@@ -31,6 +31,7 @@ namespace BattleSystem.Server
         private readonly Dictionary<string, Battle> battles = new Dictionary<string, Battle>();
         private readonly Dictionary<string, List<string>> battleClients = new Dictionary<string, List<string>>();
         private readonly Dictionary<string, Enemy> enemyTemplates = new Dictionary<string, Enemy>();
+        private readonly Dictionary<string, Dictionary<string, PlayerProgress>> playerProgressData = new Dictionary<string, Dictionary<string, PlayerProgress>>();
 
         public event Action<string> OnLog;
         public event Action<Exception> OnError;
@@ -1161,6 +1162,8 @@ namespace BattleSystem.Server
 
         private void CheckBattleEndCondition(Battle battle)
         {
+            bool battleEnded = false;
+            
             if (battle.IsPvP)
             {
                 // Em PvP, verificar se apenas um time tem jogadores vivos
@@ -1180,9 +1183,11 @@ namespace BattleSystem.Server
                 {
                     battle.State = BattleState.Finished;
                     battle.FinishedAt = DateTime.Now;
+                    battleEnded = true;
 
                     if (winningTeam != null)
                     {
+                        battle.WinnerTeamId = winningTeam.Id;
                         LogMessage($"Batalha PvP {battle.Id} finalizada. Time vencedor: {winningTeam.Name}");
                     }
                     else
@@ -1201,8 +1206,25 @@ namespace BattleSystem.Server
                 {
                     battle.State = BattleState.Finished;
                     battle.FinishedAt = DateTime.Now;
-                    LogMessage($"Batalha PvE {battle.Id} finalizada. Vencedor: {(allEnemiesDead ? "Jogadores" : "Inimigos")}");
+                    battleEnded = true;
+                    
+                    // Definir o time vencedor para recompensas de XP
+                    if (allEnemiesDead)
+                    {
+                        // Todos os times de jogadores vencem contra os inimigos
+                        LogMessage($"Batalha PvE {battle.Id} finalizada. Vencedor: Jogadores");
+                    }
+                    else
+                    {
+                        LogMessage($"Batalha PvE {battle.Id} finalizada. Vencedor: Inimigos");
+                    }
                 }
+            }
+            
+            // Se a batalha terminou, recompensar os jogadores com experiência
+            if (battleEnded)
+            {
+                _ = RewardExperienceAsync(battle);
             }
         }
 
@@ -1282,6 +1304,338 @@ namespace BattleSystem.Server
         {
             OnLog?.Invoke($"[{DateTime.Now:HH:mm:ss}] {message}");
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {message}");
+        }
+
+        // Método para gerenciar a experiência do jogador após uma batalha
+        private async Task RewardExperienceAsync(Battle battle)
+        {
+            if (battle.State != BattleState.Finished)
+                return;
+            
+            // Determinar quanto XP dar com base no tipo de batalha
+            int baseXP = battle.IsPvP ? 50 : 30; // PvP dá mais XP
+            
+            // Bônus para o time vencedor
+            double winnerMultiplier = 1.5;
+            
+            // Recompensar jogadores ativos
+            foreach (var team in battle.Teams)
+            {
+                bool isWinningTeam = false;
+                
+                if (battle.IsPvP)
+                {
+                    // Em PvP, o time vencedor é aquele com jogadores vivos
+                    isWinningTeam = team.Players.Any(p => p.IsAlive);
+                }
+                else
+                {
+                    // Em PvE, todos os times vencem se os inimigos forem derrotados
+                    isWinningTeam = battle.Enemies.All(e => !e.IsAlive);
+                }
+                
+                foreach (var player in team.Players)
+                {
+                    // Calcular XP base
+                    int xpAmount = baseXP;
+                    
+                    // Bônus para o time vencedor
+                    if (isWinningTeam)
+                        xpAmount = (int)(xpAmount * winnerMultiplier);
+                        
+                    // Bônus por nível de inimigo ou por nível do jogador adversário (em PvP)
+                    if (battle.IsPvP)
+                    {
+                        // Em PvP, bônus baseado no nível médio dos adversários
+                        double avgEnemyLevel = GetAverageEnemyLevel(battle, team.Id);
+                        xpAmount += (int)(avgEnemyLevel * 5);
+                    }
+                    else
+                    {
+                        // Em PvE, bônus baseado no número de inimigos e dificuldade
+                        xpAmount += battle.Enemies.Count * 10;
+                    }
+                    
+                    // Aplicar experiência ao jogador
+                    await AddPlayerExperienceAsync(player.Id, player.Class, xpAmount);
+                    
+                    // Aplicar o nível e XP atual ao jogador (para manter durante a sessão)
+                    if (playerProgressData.TryGetValue(player.Id, out var progressByClass) &&
+                        progressByClass.TryGetValue(player.Class, out var progress))
+                    {
+                        player.Level = progress.Level;
+                        player.Experience = progress.Experience;
+                        
+                        // Enviar uma mensagem ao cliente sobre o ganho de XP
+                        string message = $"Você ganhou {xpAmount} pontos de experiência!";
+                        if (progress.Level > player.Level)
+                        {
+                            message += $" Subiu para o nível {progress.Level}!";
+                        }
+                        
+                        // Enviar mensagem ao cliente
+                        await NotifyPlayerExperience(player.Id, xpAmount, progress.Level, progress.Experience);
+                    }
+                }
+            }
+        }
+
+        // Método para calcular o nível médio dos adversários em PvP
+        private double GetAverageEnemyLevel(Battle battle, string teamId)
+        {
+            int totalLevel = 0;
+            int count = 0;
+            
+            foreach (var team in battle.Teams)
+            {
+                if (team.Id != teamId) // Equipes adversárias
+                {
+                    foreach (var player in team.Players)
+                    {
+                        totalLevel += player.Level;
+                        count++;
+                    }
+                }
+            }
+            
+            return count > 0 ? (double)totalLevel / count : 1.0;
+        }
+
+        // Método para adicionar experiência a um jogador
+        private async Task AddPlayerExperienceAsync(string playerId, string playerClass, int amount)
+        {
+            // Inicializar o dicionário de progresso se não existir
+            if (!playerProgressData.ContainsKey(playerId))
+            {
+                playerProgressData[playerId] = new Dictionary<string, PlayerProgress>();
+            }
+            
+            // Inicializar o progresso para esta classe se não existir
+            if (!playerProgressData[playerId].ContainsKey(playerClass))
+            {
+                playerProgressData[playerId][playerClass] = new PlayerProgress(playerClass);
+            }
+            
+            // Referência ao progresso do jogador
+            var progress = playerProgressData[playerId][playerClass];
+            
+            // Adicionar experiência
+            int oldLevel = progress.Level;
+            progress.Experience += amount;
+            
+            // Verificar se o jogador subiu de nível
+            while (progress.Experience >= CalculateXpForNextLevel(progress.Level))
+            {
+                progress.Experience -= CalculateXpForNextLevel(progress.Level);
+                progress.Level++;
+                
+                LogMessage($"Jogador {playerId} subiu para o nível {progress.Level} como {playerClass}!");
+            }
+            
+            // Retornar se houve level up
+            bool leveledUp = progress.Level > oldLevel;
+            
+            // Se o jogador está em uma batalha ativa, atualizar seu nível e XP
+            foreach (var battle in battles.Values)
+            {
+                foreach (var team in battle.Teams)
+                {
+                    var player = team.Players.FirstOrDefault(p => p.Id == playerId && p.Class == playerClass);
+                    if (player != null)
+                    {
+                        player.Level = progress.Level;
+                        player.Experience = progress.Experience;
+                        
+                        // Se houve level up, atualizar os atributos do jogador
+                        if (leveledUp)
+                        {
+                            ApplyLevelUpBonuses(player, oldLevel);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Método para calcular a experiência necessária para o próximo nível
+        private int CalculateXpForNextLevel(int currentLevel)
+        {
+            // Fórmula simples: 100 * nível atual
+            return currentLevel * 100;
+        }
+
+        // Método para aplicar bônus de level up a um jogador
+        private void ApplyLevelUpBonuses(Player player, int oldLevel)
+        {
+            // Aplicar os bônus para cada nível ganho
+            for (int level = oldLevel + 1; level <= player.Level; level++)
+            {
+                switch (player.Class.ToLower())
+                {
+                    case "warrior":
+                        player.MaxHealth += 30;
+                        player.Health += 30;
+                        player.Attack += 5;
+                        player.Defense += 3;
+                        player.MaxMana += 5;
+                        player.Mana += 5;
+                        
+                        // Adicionar novas habilidades em níveis específicos
+                        if (level == 3)
+                        {
+                            AddSkillIfNotExists(player, new Skill
+                            {
+                                Id = "skill_warrior_slam",
+                                Name = "Golpe Esmagador",
+                                Description = "Ataca vários inimigos próximos",
+                                Damage = 80,
+                                ManaCost = 25,
+                                Range = 1,
+                                AffectsTeam = true
+                            });
+                        }
+                        if (level == 5)
+                        {
+                            AddSkillIfNotExists(player, new Skill
+                            {
+                                Id = "skill_warrior_berserk",
+                                Name = "Fúria Guerreira",
+                                Description = "Aumenta o ataque em troca de defesa",
+                                Damage = 0,
+                                ManaCost = 30,
+                                Range = 0
+                            });
+                        }
+                        break;
+                        
+                    case "mage":
+                        player.MaxHealth += 15;
+                        player.Health += 15;
+                        player.Attack += 2;
+                        player.Defense += 1;
+                        player.MaxMana += 20;
+                        player.Mana += 20;
+                        
+                        // Aumentar o dano das habilidades existentes
+                        foreach (var skill in player.Skills)
+                        {
+                            if (skill.Damage > 0)
+                            {
+                                skill.Damage += 5;
+                            }
+                        }
+                        
+                        // Adicionar novas habilidades em níveis específicos
+                        if (level == 3)
+                        {
+                            AddSkillIfNotExists(player, new Skill
+                            {
+                                Id = "skill_mage_frostbolt",
+                                Name = "Raio de Gelo",
+                                Description = "Dispara um raio congelante",
+                                Damage = 90,
+                                ManaCost = 25,
+                                Range = 3
+                            });
+                        }
+                        if (level == 5)
+                        {
+                            AddSkillIfNotExists(player, new Skill
+                            {
+                                Id = "skill_mage_meteor",
+                                Name = "Chuva de Meteoros",
+                                Description = "Invoca meteoros que atingem todos os inimigos",
+                                Damage = 150,
+                                ManaCost = 50,
+                                Range = 4,
+                                AffectsTeam = true
+                            });
+                        }
+                        break;
+                        
+                    case "healer":
+                        player.MaxHealth += 20;
+                        player.Health += 20;
+                        player.Attack += 1;
+                        player.Defense += 2;
+                        player.MaxMana += 15;
+                        player.Mana += 15;
+                        
+                        // Aumentar o poder de cura das habilidades existentes
+                        foreach (var skill in player.Skills)
+                        {
+                            if (skill.Healing > 0)
+                            {
+                                skill.Healing += 8;
+                            }
+                        }
+                        
+                        // Adicionar novas habilidades em níveis específicos
+                        if (level == 3)
+                        {
+                            AddSkillIfNotExists(player, new Skill
+                            {
+                                Id = "skill_healer_mass_heal",
+                                Name = "Cura em Massa",
+                                Description = "Cura todos os aliados próximos",
+                                Healing = 70,
+                                ManaCost = 35,
+                                Range = 3,
+                                AffectsTeam = true
+                            });
+                        }
+                        if (level == 5)
+                        {
+                            AddSkillIfNotExists(player, new Skill
+                            {
+                                Id = "skill_healer_resurrection",
+                                Name = "Ressurreição",
+                                Description = "Revive um aliado caído com parte da vida",
+                                Healing = 150,
+                                ManaCost = 60,
+                                Range = 2
+                            });
+                        }
+                        break;
+                        
+                    default:
+                        // Classe padrão - crescimento balanceado
+                        player.MaxHealth += 20;
+                        player.Health += 20;
+                        player.Attack += 3;
+                        player.Defense += 2;
+                        player.MaxMana += 10;
+                        player.Mana += 10;
+                        break;
+                }
+            }
+        }
+
+        // Adicionar habilidade se ela ainda não existir
+        private void AddSkillIfNotExists(Player player, Skill newSkill)
+        {
+            if (!player.Skills.Any(s => s.Id == newSkill.Id))
+            {
+                player.Skills.Add(newSkill);
+                LogMessage($"Jogador {player.Name} aprendeu nova habilidade: {newSkill.Name}!");
+            }
+        }
+
+        // Notificar o jogador sobre ganho de experiência
+        private async Task NotifyPlayerExperience(string playerId, int xpGained, int level, int experience)
+        {
+            if (!clients.TryGetValue(playerId, out var client))
+                return;
+            
+            var response = new ExperienceUpdateResponse
+            {
+                Success = true,
+                Message = $"Você ganhou {xpGained} pontos de experiência!",
+                Level = level,
+                Experience = experience,
+                ExperienceToNextLevel = CalculateXpForNextLevel(level)
+            };
+            
+            await client.SendMessageAsync(JsonConvert.SerializeObject(response));
         }
     }
 
@@ -1399,6 +1753,21 @@ namespace BattleSystem.Server
             };
 
             await server.Start();
+        }
+    }
+
+    [Serializable]
+    public class PlayerProgress
+    {
+        public int Level { get; set; } = 1;
+        public int Experience { get; set; } = 0;
+        public string Class { get; set; }
+        
+        public PlayerProgress(string playerClass, int level = 1, int exp = 0)
+        {
+            Class = playerClass;
+            Level = level;
+            Experience = exp;
         }
     }
 }

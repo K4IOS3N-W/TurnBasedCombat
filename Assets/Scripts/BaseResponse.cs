@@ -78,4 +78,20 @@ namespace BattleSystem
         [JsonProperty("battleId")]
         public string BattleId { get; set; }
     }
+
+    [Serializable]
+    public class ExperienceUpdateResponse : BaseResponse
+    {
+        [JsonProperty("level")]
+        public int Level { get; set; }
+        
+        [JsonProperty("experience")]
+        public int Experience { get; set; }
+        
+        [JsonProperty("experienceToNextLevel")]
+        public int ExperienceToNextLevel { get; set; }
+        
+        [JsonProperty("xpGained")]
+        public int XpGained { get; set; }
+    }
 }
