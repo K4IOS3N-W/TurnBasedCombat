@@ -34,7 +34,6 @@ namespace BattleSystem
         public string TeamName { get; set; }
     }
 
-
     [Serializable]
     public class JoinBattleResponse : BaseResponse
     {
@@ -74,9 +73,15 @@ namespace BattleSystem
         [JsonProperty("battle")]
         public Battle Battle { get; set; }
 
-        // Adicionar um campo para retornar o ID da batalha além do próprio objeto Battle
         [JsonProperty("battleId")]
         public string BattleId { get; set; }
+    }
+
+    [Serializable]
+    public class StatusEffectsResponse : BaseResponse
+    {
+        [JsonProperty("results")]
+        public List<ActionResult> Results { get; set; }
     }
 
     [Serializable]
@@ -93,5 +98,17 @@ namespace BattleSystem
         
         [JsonProperty("xpGained")]
         public int XpGained { get; set; }
+        
+        [JsonProperty("class")]
+        public string Class { get; set; }
+        
+        [JsonProperty("leveledUp")]
+        public bool LeveledUp { get; set; }
+        
+        [JsonProperty("newSkillsLearned")]
+        public List<string> NewSkillsLearned { get; set; } = new List<string>();
+        
+        [JsonProperty("statBonuses")]
+        public Dictionary<string, int> StatBonuses { get; set; } = new Dictionary<string, int>();
     }
 }

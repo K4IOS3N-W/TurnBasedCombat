@@ -31,7 +31,12 @@ namespace BattleSystem.Server
         private readonly Dictionary<string, Battle> battles = new Dictionary<string, Battle>();
         private readonly Dictionary<string, List<string>> battleClients = new Dictionary<string, List<string>>();
         private readonly Dictionary<string, Enemy> enemyTemplates = new Dictionary<string, Enemy>();
-        private readonly Dictionary<string, Dictionary<string, PlayerProgress>> playerProgressData = new Dictionary<string, Dictionary<string, PlayerProgress>>();
+
+        // Modified: Session-based progression per client
+        private readonly Dictionary<string, Dictionary<string, ClassProgress>> sessionProgressData = new Dictionary<string, Dictionary<string, ClassProgress>>();
+
+        // Dicionário para mapear códigos de sala aos IDs de batalha
+        private readonly Dictionary<string, string> roomCodeToBattleId = new Dictionary<string, string>();
 
         public event Action<string> OnLog;
         public event Action<Exception> OnError;
@@ -170,8 +175,16 @@ namespace BattleSystem.Server
 
                 while (isRunning)
                 {
-                    var tcpClient = await tcpListener.AcceptTcpClientAsync();
-                    _ = HandleClientAsync(tcpClient);
+                    try
+                    {
+                        var tcpClient = await tcpListener.AcceptTcpClientAsync();
+                        _ = HandleClientAsync(tcpClient);
+                    }
+                    catch (Exception ex) when (isRunning)
+                    {
+                        OnError?.Invoke(ex);
+                        LogMessage($"Erro ao aceitar cliente: {ex.Message}");
+                    }
                 }
             }
             catch (Exception ex)
@@ -179,15 +192,23 @@ namespace BattleSystem.Server
                 OnError?.Invoke(ex);
                 LogMessage($"Erro ao iniciar servidor: {ex.Message}");
             }
+            finally
+            {
+                isRunning = false;
+                tcpListener?.Stop();
+            }
         }
-
 
         public void Stop()
         {
+            if (!isRunning)
+                return;
+
             isRunning = false;
             tcpListener?.Stop();
 
-            foreach (var client in clients.Values)
+            // Desconectar todos os clientes
+            foreach (var client in clients.Values.ToList())
             {
                 client.Disconnect(DisconnectReason.ServerInitiated);
             }
@@ -195,34 +216,53 @@ namespace BattleSystem.Server
             clients.Clear();
             LogMessage("Servidor desligado");
         }
+
         private async Task HandleClientAsync(TcpClient tcpClient)
         {
             var clientId = Guid.NewGuid().ToString();
-            var client = new ClientConnection(tcpClient, clientId);
-
-            lock (clients)
-            {
-                clients.Add(clientId, client);
-            }
-
-            LogMessage($"Cliente conectado: {clientId}");
-
-            client.OnMessageReceived += async (message) =>
-            {
-                await ProcessMessageAsync(client, message);
-            };
-
-            client.OnDisconnected += HandleClientDisconnection;
+            LogMessage($"Novo cliente conectando: {clientId}");
 
             try
             {
+                var client = new ClientConnection(tcpClient, clientId);
+
+                // Registrar handlers de eventos
+                client.OnMessageReceived += async (message) =>
+                {
+                    await ProcessMessageAsync(client, message);
+                };
+
+                client.OnDisconnected += HandleClientDisconnection;
+
+                // Adicionar o cliente à coleção de clientes
+                lock (clients)
+                {
+                    clients.Add(clientId, client);
+                }
+
+                LogMessage($"Cliente conectado: {clientId}");
+
+                // Iniciar loop de escuta para este cliente
                 await client.StartListeningAsync();
             }
             catch (Exception ex)
             {
                 OnError?.Invoke(ex);
                 LogMessage($"Erro ao processar cliente {clientId}: {ex.Message}");
-                client.Disconnect(DisconnectReason.Error);
+
+                // Se o cliente já foi adicionado à coleção, desconecte-o
+                lock (clients)
+                {
+                    if (clients.TryGetValue(clientId, out var client))
+                    {
+                        client.Disconnect(DisconnectReason.Error);
+                    }
+                    else
+                    {
+                        // Se o cliente não foi adicionado, feche a conexão diretamente
+                        tcpClient.Close();
+                    }
+                }
             }
         }
 
@@ -231,6 +271,13 @@ namespace BattleSystem.Server
             lock (clients)
             {
                 clients.Remove(clientId);
+
+                // Limpar dados de progresso da sessão
+                if (sessionProgressData.ContainsKey(clientId))
+                {
+                    LogMessage($"Limpando dados de progresso para cliente {clientId}");
+                    sessionProgressData.Remove(clientId);
+                }
 
                 // Remover cliente das batalhas
                 foreach (var battleId in battleClients.Keys.ToList())
@@ -244,7 +291,7 @@ namespace BattleSystem.Server
                         {
                             var battleInfo = battles[battleId];
                             string disconnectMessage = $"Jogador desconectado da batalha: {battleId}, Razão: {reason}";
-                            NotifyBattleClients(battleId, disconnectMessage);
+                            _ = NotifyBattleClients(battleId, disconnectMessage);
 
                             // Verificar se a batalha ficou vazia
                             if (battleClients[battleId].Count == 0 && battleInfo.State != BattleState.Finished)
@@ -260,8 +307,6 @@ namespace BattleSystem.Server
 
             LogMessage($"Cliente desconectado: {clientId}, Razão: {reason}");
         }
-
-
 
         private async Task ProcessMessageAsync(ClientConnection client, string message)
         {
@@ -295,20 +340,17 @@ namespace BattleSystem.Server
                         break;
                     default:
                         LogMessage($"Tipo de requisição desconhecido: {baseRequest.RequestType}");
-                        await SendErrorResponse(client, "Tipo de requisição desconhecido");
+                        await SendErrorResponse(client, "Tipo de requisição desconhecida");
                         break;
                 }
             }
             catch (Exception ex)
             {
                 OnError?.Invoke(ex);
-                LogMessage($"Erro ao processar mensagem: {ex.Message}");
+                LogMessage($"Erro ao processar mensagem: {ex.Message}\nDetalhe: {ex.StackTrace}");
                 await SendErrorResponse(client, "Erro ao processar requisição");
             }
         }
-
-        // Modificar para suportar busca por código de sala
-       
 
         private async Task SendErrorResponse(ClientConnection client, string message)
         {
@@ -336,13 +378,15 @@ namespace BattleSystem.Server
             var battle = new Battle
             {
                 Id = battleId,
-                RoomCode = roomCode, // Adicionar este campo à classe Battle
+                RoomCode = roomCode,
                 State = BattleState.Preparation,
-                StartedAt = DateTime.Now
+                StartedAt = DateTime.Now,
+                Teams = new List<Team>(),
+                Enemies = new List<Enemy>(),
+                TeamReadyStatus = new Dictionary<string, bool>()
             };
 
             battles.Add(battleId, battle);
-            // Mapear também pelo código de sala para facilitar a busca
             roomCodeToBattleId.Add(roomCode, battleId);
             battleClients.Add(battleId, new List<string> { client.Id });
 
@@ -353,14 +397,11 @@ namespace BattleSystem.Server
                 Success = true,
                 Message = "Batalha criada com sucesso",
                 BattleId = battleId,
-                RoomCode = roomCode // Adicionar campo à resposta
+                RoomCode = roomCode
             };
 
             await client.SendMessageAsync(JsonConvert.SerializeObject(response));
         }
-
-        // Dicionário para mapear códigos de sala aos IDs de batalha
-        private readonly Dictionary<string, string> roomCodeToBattleId = new Dictionary<string, string>();
 
         // Método para gerar um código de sala único de 5 dígitos
         private string GenerateRoomCode()
@@ -416,9 +457,9 @@ namespace BattleSystem.Server
                 return;
             }
 
-            // Criar jogador com ID numérico de até 4 dígitos
+            // Create player with session-based progression
             var playerId = new Random().Next(1000, 9999).ToString();
-            var player = Player.CreatePlayer(playerId, request.PlayerName, request.Class);
+            var player = CreatePlayerWithSessionProgress(client.Id, playerId, request.PlayerName, request.Class);
 
             // Adicionar jogador a uma equipe - SISTEMA MELHORADO DE DISTRIBUIÇÃO
             Team team = null;
@@ -445,7 +486,8 @@ namespace BattleSystem.Server
                         team = new Team
                         {
                             Id = "team2",
-                            Name = "Time 2"
+                            Name = "Time 2",
+                            Players = new List<Player>()
                         };
                         battle.Teams.Add(team);
                     }
@@ -472,7 +514,8 @@ namespace BattleSystem.Server
                             team = new Team
                             {
                                 Id = "team2",
-                                Name = "Time 2"
+                                Name = "Time 2",
+                                Players = new List<Player>()
                             };
                             battle.Teams.Add(team);
                         }
@@ -489,7 +532,8 @@ namespace BattleSystem.Server
                     team = new Team
                     {
                         Id = "team1",
-                        Name = "Time 1"
+                        Name = "Time 1",
+                        Players = new List<Player>()
                     };
                     battle.Teams.Add(team);
                 }
@@ -507,7 +551,8 @@ namespace BattleSystem.Server
                     team = new Team
                     {
                         Id = teamId,
-                        Name = $"Time {battle.Teams.Count + 1}"
+                        Name = $"Time {battle.Teams.Count + 1}",
+                        Players = new List<Player>()
                     };
                     battle.Teams.Add(team);
                 }
@@ -572,7 +617,8 @@ namespace BattleSystem.Server
             var team = new Team
             {
                 Id = teamId,
-                Name = request.TeamName
+                Name = request.TeamName,
+                Players = new List<Player>()
             };
 
             battle.Teams.Add(team);
@@ -592,7 +638,6 @@ namespace BattleSystem.Server
             // Notificar outros clientes da nova equipe
             await BroadcastBattleState(battle.Id);
         }
-
 
         private async Task HandleSetTeamReady(ClientConnection client, string message)
         {
@@ -776,11 +821,13 @@ namespace BattleSystem.Server
                 return;
             }
 
+            string responseJson = JsonConvert.SerializeObject(response);
+
             foreach (var clientId in clientIds)
             {
                 if (clients.TryGetValue(clientId, out var client))
                 {
-                    await client.SendMessageAsync(JsonConvert.SerializeObject(response));
+                    await client.SendMessageAsync(responseJson);
                 }
             }
         }
@@ -865,7 +912,6 @@ namespace BattleSystem.Server
             await BroadcastBattleState(battle.Id);
         }
 
-        
         private async Task ProcessAttack(Battle battle, Player attacker, Action action, List<ActionResult> results)
         {
             // Encontrar o alvo
@@ -1101,7 +1147,6 @@ namespace BattleSystem.Server
             return enemy;
         }
 
-
         private bool IsAlly(Player caster, object target, Battle battle)
         {
             // Se target é jogador, verificar se está na mesma equipe
@@ -1163,7 +1208,7 @@ namespace BattleSystem.Server
         private void CheckBattleEndCondition(Battle battle)
         {
             bool battleEnded = false;
-            
+
             if (battle.IsPvP)
             {
                 // Em PvP, verificar se apenas um time tem jogadores vivos
@@ -1207,7 +1252,7 @@ namespace BattleSystem.Server
                     battle.State = BattleState.Finished;
                     battle.FinishedAt = DateTime.Now;
                     battleEnded = true;
-                    
+
                     // Definir o time vencedor para recompensas de XP
                     if (allEnemiesDead)
                     {
@@ -1220,7 +1265,7 @@ namespace BattleSystem.Server
                     }
                 }
             }
-            
+
             // Se a batalha terminou, recompensar os jogadores com experiência
             if (battleEnded)
             {
@@ -1275,7 +1320,8 @@ namespace BattleSystem.Server
             {
                 Success = true,
                 Message = "Atualização de estado da batalha",
-                Battle = battle
+                Battle = battle,
+                BattleId = battleId
             };
 
             var message = JsonConvert.SerializeObject(response);
@@ -1289,13 +1335,18 @@ namespace BattleSystem.Server
                 return;
             }
 
+            List<Task> sendTasks = new List<Task>();
+
             foreach (var clientId in clientIds)
             {
-                if (clients.TryGetValue(clientId, out var client))
+                if (clients.TryGetValue(clientId, out var client) && client.IsConnected)
                 {
-                    await client.SendMessageAsync(message);
+                    sendTasks.Add(client.SendMessageAsync(message));
                 }
             }
+
+            // Aguardar todas as mensagens serem enviadas
+            await Task.WhenAll(sendTasks);
         }
 
         #endregion
@@ -1311,463 +1362,351 @@ namespace BattleSystem.Server
         {
             if (battle.State != BattleState.Finished)
                 return;
-            
-            // Determinar quanto XP dar com base no tipo de batalha
-            int baseXP = battle.IsPvP ? 50 : 30; // PvP dá mais XP
-            
-            // Bônus para o time vencedor
+
+            int baseXP = battle.IsPvP ? 50 : 30;
             double winnerMultiplier = 1.5;
-            
-            // Recompensar jogadores ativos
+
             foreach (var team in battle.Teams)
             {
                 bool isWinningTeam = false;
-                
+
                 if (battle.IsPvP)
                 {
-                    // Em PvP, o time vencedor é aquele com jogadores vivos
                     isWinningTeam = team.Players.Any(p => p.IsAlive);
                 }
                 else
                 {
-                    // Em PvE, todos os times vencem se os inimigos forem derrotados
                     isWinningTeam = battle.Enemies.All(e => !e.IsAlive);
                 }
-                
+
                 foreach (var player in team.Players)
                 {
-                    // Calcular XP base
                     int xpAmount = baseXP;
-                    
-                    // Bônus para o time vencedor
+
                     if (isWinningTeam)
                         xpAmount = (int)(xpAmount * winnerMultiplier);
-                        
-                    // Bônus por nível de inimigo ou por nível do jogador adversário (em PvP)
+
                     if (battle.IsPvP)
                     {
-                        // Em PvP, bônus baseado no nível médio dos adversários
                         double avgEnemyLevel = GetAverageEnemyLevel(battle, team.Id);
                         xpAmount += (int)(avgEnemyLevel * 5);
                     }
                     else
                     {
-                        // Em PvE, bônus baseado no número de inimigos e dificuldade
                         xpAmount += battle.Enemies.Count * 10;
                     }
-                    
-                    // Aplicar experiência ao jogador
-                    await AddPlayerExperienceAsync(player.Id, player.Class, xpAmount);
-                    
-                    // Aplicar o nível e XP atual ao jogador (para manter durante a sessão)
-                    if (playerProgressData.TryGetValue(player.Id, out var progressByClass) &&
-                        progressByClass.TryGetValue(player.Class, out var progress))
+
+                    // Find the client that controls this player and add experience to their session
+                    string clientId = FindClientIdForPlayer(battle.Id, player.Id);
+                    if (!string.IsNullOrEmpty(clientId))
                     {
-                        player.Level = progress.Level;
-                        player.Experience = progress.Experience;
-                        
-                        // Enviar uma mensagem ao cliente sobre o ganho de XP
-                        string message = $"Você ganhou {xpAmount} pontos de experiência!";
-                        if (progress.Level > player.Level)
-                        {
-                            message += $" Subiu para o nível {progress.Level}!";
-                        }
-                        
-                        // Enviar mensagem ao cliente
-                        await NotifyPlayerExperience(player.Id, xpAmount, progress.Level, progress.Experience);
+                        await AddSessionExperienceAsync(clientId, player.Class, xpAmount, player);
                     }
                 }
             }
         }
 
-        // Método para calcular o nível médio dos adversários em PvP
-        private double GetAverageEnemyLevel(Battle battle, string teamId)
+        // Add missing method to create player with session progress
+        private Player CreatePlayerWithSessionProgress(string clientId, string playerId, string playerName, string className)
         {
-            int totalLevel = 0;
-            int count = 0;
-            
-            foreach (var team in battle.Teams)
+            // Initialize session progress for this client if it doesn't exist
+            if (!sessionProgressData.ContainsKey(clientId))
             {
-                if (team.Id != teamId) // Equipes adversárias
-                {
-                    foreach (var player in team.Players)
+                sessionProgressData[clientId] = new Dictionary<string, ClassProgress>();
+            }
+
+            // Get or create class progress for this class
+            if (!sessionProgressData[clientId].ContainsKey(className))
+            {
+                sessionProgressData[clientId][className] = new ClassProgress(className);
+            }
+
+            var classProgress = sessionProgressData[clientId][className];
+
+            // Create player with stats based on level
+            var player = new Player
+            {
+                Id = playerId,
+                Name = playerName,
+                Class = className,
+                Level = classProgress.Level,
+                Health = GetBaseHealth(className) + (classProgress.Level - 1) * 20,
+                MaxHealth = GetBaseHealth(className) + (classProgress.Level - 1) * 20,
+                Mana = GetBaseMana(className) + (classProgress.Level - 1) * 10,
+                MaxMana = GetBaseMana(className) + (classProgress.Level - 1) * 10,
+                Attack = GetBaseAttack(className) + (classProgress.Level - 1) * 5,
+                Defense = GetBaseDefense(className) + (classProgress.Level - 1) * 3,
+                Speed = GetBaseSpeed(className) + (classProgress.Level - 1) * 2,
+                Skills = GetSkillsForClass(className, classProgress.Level)
+            };
+
+            return player;
+        }
+
+        private int GetBaseHealth(string className)
+        {
+            return className.ToLower() switch
+            {
+                "warrior" => 150,
+                "mage" => 100,
+                "healer" => 120,
+                _ => 100
+            };
+        }
+
+        private int GetBaseMana(string className)
+        {
+            return className.ToLower() switch
+            {
+                "warrior" => 50,
+                "mage" => 120,
+                "healer" => 100,
+                _ => 50
+            };
+        }
+
+        private int GetBaseAttack(string className)
+        {
+            return className.ToLower() switch
+            {
+                "warrior" => 70,
+                "mage" => 60,
+                "healer" => 40,
+                _ => 50
+            };
+        }
+
+        private int GetBaseDefense(string className)
+        {
+            return className.ToLower() switch
+            {
+                "warrior" => 60,
+                "mage" => 30,
+                "healer" => 50,
+                _ => 40
+            };
+        }
+
+        private int GetBaseSpeed(string className)
+        {
+            return className.ToLower() switch
+            {
+                "warrior" => 50,
+                "mage" => 70,
+                "healer" => 60,
+                _ => 50
+            };
+        }
+
+        private List<Skill> GetSkillsForClass(string className, int level)
+        {
+            var skills = new List<Skill>();
+
+            switch (className.ToLower())
+            {
+                case "warrior":
+                    skills.Add(new Skill
                     {
-                        totalLevel += player.Level;
-                        count++;
-                    }
-                }
-            }
-            
-            return count > 0 ? (double)totalLevel / count : 1.0;
-        }
+                        Id = "skill_warrior_slash",
+                        Name = "Golpe Poderoso",
+                        Description = "Um ataque físico poderoso",
+                        Damage = 80 + (level * 5),
+                        ManaCost = 20,
+                        Range = 1,
+                        CurrentCooldown = 0,
+                        MaxCooldown = 2
+                    });
 
-        // Método para adicionar experiência a um jogador
-        private async Task AddPlayerExperienceAsync(string playerId, string playerClass, int amount)
-        {
-            // Inicializar o dicionário de progresso se não existir
-            if (!playerProgressData.ContainsKey(playerId))
-            {
-                playerProgressData[playerId] = new Dictionary<string, PlayerProgress>();
-            }
-            
-            // Inicializar o progresso para esta classe se não existir
-            if (!playerProgressData[playerId].ContainsKey(playerClass))
-            {
-                playerProgressData[playerId][playerClass] = new PlayerProgress(playerClass);
-            }
-            
-            // Referência ao progresso do jogador
-            var progress = playerProgressData[playerId][playerClass];
-            
-            // Adicionar experiência
-            int oldLevel = progress.Level;
-            progress.Experience += amount;
-            
-            // Verificar se o jogador subiu de nível
-            while (progress.Experience >= CalculateXpForNextLevel(progress.Level))
-            {
-                progress.Experience -= CalculateXpForNextLevel(progress.Level);
-                progress.Level++;
-                
-                LogMessage($"Jogador {playerId} subiu para o nível {progress.Level} como {playerClass}!");
-            }
-            
-            // Retornar se houve level up
-            bool leveledUp = progress.Level > oldLevel;
-            
-            // Se o jogador está em uma batalha ativa, atualizar seu nível e XP
-            foreach (var battle in battles.Values)
-            {
-                foreach (var team in battle.Teams)
-                {
-                    var player = team.Players.FirstOrDefault(p => p.Id == playerId && p.Class == playerClass);
-                    if (player != null)
+                    if (level >= 3)
                     {
-                        player.Level = progress.Level;
-                        player.Experience = progress.Experience;
-                        
-                        // Se houve level up, atualizar os atributos do jogador
-                        if (leveledUp)
+                        skills.Add(new Skill
                         {
-                            ApplyLevelUpBonuses(player, oldLevel);
-                        }
+                            Id = "skill_warrior_taunt",
+                            Name = "Provocar",
+                            Description = "Força o inimigo a atacar você",
+                            ManaCost = 15,
+                            Range = 1,
+                            CurrentCooldown = 0,
+                            MaxCooldown = 3
+                        });
                     }
-                }
+                    break;
+
+                case "mage":
+                    skills.Add(new Skill
+                    {
+                        Id = "skill_mage_fireball",
+                        Name = "Bola de Fogo",
+                        Description = "Lança uma bola de fogo mágica",
+                        Damage = 90 + (level * 6),
+                        ManaCost = 30,
+                        Range = 3,
+                        CurrentCooldown = 0,
+                        MaxCooldown = 1
+                    });
+
+                    if (level >= 2)
+                    {
+                        skills.Add(new Skill
+                        {
+                            Id = "skill_mage_lightning",
+                            Name = "Zoltraak",
+                            Description = "Precise Demon-Killing Magic",
+                            Damage = 70 + (level * 4),
+                            ManaCost = 25,
+                            Range = 2,
+                            CurrentCooldown = 0,
+                            MaxCooldown = 1
+                        });
+                    }
+                    break;
+
+                case "healer":
+                    skills.Add(new Skill
+                    {
+                        Id = "skill_healer_heal",
+                        Name = "Curar",
+                        Description = "Restaura a vida de um aliado",
+                        Healing = 80 + (level * 8),
+                        ManaCost = 25,
+                        Range = 3,
+                        CurrentCooldown = 0,
+                        MaxCooldown = 1
+                    });
+
+                    if (level >= 2)
+                    {
+                        skills.Add(new Skill
+                        {
+                            Id = "skill_healer_shield",
+                            Name = "Escudo Mágico",
+                            Description = "Aumenta a defesa de um aliado",
+                            ManaCost = 20,
+                            Range = 3,
+                            CurrentCooldown = 0,
+                            MaxCooldown = 2
+                        });
+                    }
+                    break;
             }
+
+            return skills;
         }
 
-        // Método para calcular a experiência necessária para o próximo nível
-        private int CalculateXpForNextLevel(int currentLevel)
+        private string FindClientIdForPlayer(string battleId, string playerId)
         {
-            // Fórmula simples: 100 * nível atual
-            return currentLevel * 100;
-        }
+            if (!battleClients.TryGetValue(battleId, out var clientIds))
+                return null;
 
-        // Método para aplicar bônus de level up a um jogador
-        private void ApplyLevelUpBonuses(Player player, int oldLevel)
-        {
-            // Aplicar os bônus para cada nível ganho
-            for (int level = oldLevel + 1; level <= player.Level; level++)
+            // For this simple implementation, we'll find the client that has this player
+            // In a more complex system, you'd maintain a player-to-client mapping
+            foreach (var clientId in clientIds)
             {
-                switch (player.Class.ToLower())
+                if (sessionProgressData.ContainsKey(clientId))
                 {
-                    case "warrior":
-                        player.MaxHealth += 30;
-                        player.Health += 30;
-                        player.Attack += 5;
-                        player.Defense += 3;
-                        player.MaxMana += 5;
-                        player.Mana += 5;
-                        
-                        // Adicionar novas habilidades em níveis específicos
-                        if (level == 3)
-                        {
-                            AddSkillIfNotExists(player, new Skill
-                            {
-                                Id = "skill_warrior_slam",
-                                Name = "Golpe Esmagador",
-                                Description = "Ataca vários inimigos próximos",
-                                Damage = 80,
-                                ManaCost = 25,
-                                Range = 1,
-                                AffectsTeam = true
-                            });
-                        }
-                        if (level == 5)
-                        {
-                            AddSkillIfNotExists(player, new Skill
-                            {
-                                Id = "skill_warrior_berserk",
-                                Name = "Fúria Guerreira",
-                                Description = "Aumenta o ataque em troca de defesa",
-                                Damage = 0,
-                                ManaCost = 30,
-                                Range = 0
-                            });
-                        }
-                        break;
-                        
-                    case "mage":
-                        player.MaxHealth += 15;
-                        player.Health += 15;
-                        player.Attack += 2;
-                        player.Defense += 1;
-                        player.MaxMana += 20;
-                        player.Mana += 20;
-                        
-                        // Aumentar o dano das habilidades existentes
-                        foreach (var skill in player.Skills)
-                        {
-                            if (skill.Damage > 0)
-                            {
-                                skill.Damage += 5;
-                            }
-                        }
-                        
-                        // Adicionar novas habilidades em níveis específicos
-                        if (level == 3)
-                        {
-                            AddSkillIfNotExists(player, new Skill
-                            {
-                                Id = "skill_mage_frostbolt",
-                                Name = "Raio de Gelo",
-                                Description = "Dispara um raio congelante",
-                                Damage = 90,
-                                ManaCost = 25,
-                                Range = 3
-                            });
-                        }
-                        if (level == 5)
-                        {
-                            AddSkillIfNotExists(player, new Skill
-                            {
-                                Id = "skill_mage_meteor",
-                                Name = "Chuva de Meteoros",
-                                Description = "Invoca meteoros que atingem todos os inimigos",
-                                Damage = 150,
-                                ManaCost = 50,
-                                Range = 4,
-                                AffectsTeam = true
-                            });
-                        }
-                        break;
-                        
-                    case "healer":
-                        player.MaxHealth += 20;
-                        player.Health += 20;
-                        player.Attack += 1;
-                        player.Defense += 2;
-                        player.MaxMana += 15;
-                        player.Mana += 15;
-                        
-                        // Aumentar o poder de cura das habilidades existentes
-                        foreach (var skill in player.Skills)
-                        {
-                            if (skill.Healing > 0)
-                            {
-                                skill.Healing += 8;
-                            }
-                        }
-                        
-                        // Adicionar novas habilidades em níveis específicos
-                        if (level == 3)
-                        {
-                            AddSkillIfNotExists(player, new Skill
-                            {
-                                Id = "skill_healer_mass_heal",
-                                Name = "Cura em Massa",
-                                Description = "Cura todos os aliados próximos",
-                                Healing = 70,
-                                ManaCost = 35,
-                                Range = 3,
-                                AffectsTeam = true
-                            });
-                        }
-                        if (level == 5)
-                        {
-                            AddSkillIfNotExists(player, new Skill
-                            {
-                                Id = "skill_healer_resurrection",
-                                Name = "Ressurreição",
-                                Description = "Revive um aliado caído com parte da vida",
-                                Healing = 150,
-                                ManaCost = 60,
-                                Range = 2
-                            });
-                        }
-                        break;
-                        
-                    default:
-                        // Classe padrão - crescimento balanceado
-                        player.MaxHealth += 20;
-                        player.Health += 20;
-                        player.Attack += 3;
-                        player.Defense += 2;
-                        player.MaxMana += 10;
-                        player.Mana += 10;
-                        break;
+                    // This is a simplified approach - in production you'd want better tracking
+                    return clientId;
                 }
             }
+
+            return clientIds.FirstOrDefault();
         }
 
-        // Adicionar habilidade se ela ainda não existir
-        private void AddSkillIfNotExists(Player player, Skill newSkill)
+        private async Task AddSessionExperienceAsync(string clientId, string className, int xpAmount, Player player)
         {
-            if (!player.Skills.Any(s => s.Id == newSkill.Id))
+            if (!sessionProgressData.ContainsKey(clientId) ||
+                !sessionProgressData[clientId].ContainsKey(className))
             {
-                player.Skills.Add(newSkill);
-                LogMessage($"Jogador {player.Name} aprendeu nova habilidade: {newSkill.Name}!");
-            }
-        }
-
-        // Notificar o jogador sobre ganho de experiência
-        private async Task NotifyPlayerExperience(string playerId, int xpGained, int level, int experience)
-        {
-            if (!clients.TryGetValue(playerId, out var client))
+                LogMessage($"No session progress found for client {clientId}, class {className}");
                 return;
-            
+            }
+
+            var classProgress = sessionProgressData[clientId][className];
+
+            classProgress.Experience += xpAmount;
+            bool leveledUp = false;
+            var newSkills = new List<string>();
+            var statBonuses = new Dictionary<string, int>();
+
+            // Check for level up
+            int xpForNextLevel = CalculateXpForNextLevel(classProgress.Level);
+            while (classProgress.Experience >= xpForNextLevel)
+            {
+                classProgress.Experience -= xpForNextLevel;
+                classProgress.Level++;
+                leveledUp = true;
+
+                // Add stat bonuses
+                statBonuses["Health"] = 20;
+                statBonuses["Mana"] = 10;
+                statBonuses["Attack"] = 5;
+                statBonuses["Defense"] = 3;
+                statBonuses["Speed"] = 2;
+
+                // Check for new skills
+                var newPlayerSkills = GetSkillsForClass(className, classProgress.Level);
+                var currentSkillIds = player.Skills.Select(s => s.Id).ToHashSet();
+
+                foreach (var skill in newPlayerSkills)
+                {
+                    if (!currentSkillIds.Contains(skill.Id))
+                    {
+                        newSkills.Add(skill.Name);
+                        player.Skills.Add(skill);
+                    }
+                }
+
+                xpForNextLevel = CalculateXpForNextLevel(classProgress.Level);
+
+                LogMessage($"Client {clientId} leveled up class {className} to level {classProgress.Level}");
+            }
+
+            // Send experience update to client
             var response = new ExperienceUpdateResponse
             {
                 Success = true,
-                Message = $"Você ganhou {xpGained} pontos de experiência!",
-                Level = level,
-                Experience = experience,
-                ExperienceToNextLevel = CalculateXpForNextLevel(level)
-            };
-            
-            await client.SendMessageAsync(JsonConvert.SerializeObject(response));
-        }
-    }
-
-    public class ClientConnection
-    {
-        private readonly TcpClient tcpClient;
-        private readonly NetworkStream stream;
-        private bool isConnected;
-        private readonly byte[] buffer = new byte[4096];
-
-        public string Id { get; }
-        public event Action<string> OnMessageReceived;
-        public event ClientDisconnectedHandler OnDisconnected;  // Delegado personalizado
-
-        public ClientConnection(TcpClient client, string id)
-        {
-            tcpClient = client;
-            stream = client.GetStream();
-            Id = id;
-            isConnected = true;
-        }
-
-        public async Task StartListeningAsync()
-        {
-            try
-            {
-                while (isConnected)
-                {
-                    int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
-                    if (bytesRead == 0)
-                    {
-                        Disconnect(DisconnectReason.ConnectionLost);
-                        break;
-                    }
-
-                    string message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    OnMessageReceived?.Invoke(message);
-                }
-            }
-            catch (IOException)
-            {
-                // Conexão fechada
-                Disconnect(DisconnectReason.ConnectionLost);
-            }
-            catch (Exception)
-            {
-                Disconnect(DisconnectReason.Error);
-                throw;
-            }
-        }
-
-        public async Task SendMessageAsync(string message)
-        {
-            if (!isConnected)
-            {
-                return;
-            }
-
-            try
-            {
-                byte[] data = Encoding.UTF8.GetBytes(message);
-                await stream.WriteAsync(data, 0, data.Length);
-            }
-            catch (IOException)
-            {
-                // Conexão fechada
-                Disconnect(DisconnectReason.ConnectionLost);
-            }
-            catch (Exception)
-            {
-                Disconnect(DisconnectReason.Error);
-                throw;
-            }
-        }
-
-        public void Disconnect(DisconnectReason reason = DisconnectReason.ClientInitiated)
-        {
-            if (!isConnected)
-            {
-                return;
-            }
-
-            isConnected = false;
-            stream?.Close();
-            tcpClient?.Close();
-            OnDisconnected?.Invoke(Id, reason);
-        }
-    }
-
-    // Classe para iniciar o servidor (console/aplicação separada)
-    public class BattleServerLauncher
-    {
-        public static async Task Main(string[] args)
-        {
-            Console.WriteLine("Iniciando servidor de batalha...");
-
-            int port = 7777;
-            if (args.Length > 0 && int.TryParse(args[0], out int customPort))
-            {
-                port = customPort;
-            }
-
-            var server = new BattleServer(port);
-            server.OnLog += Console.WriteLine;
-            server.OnError += (ex) => Console.WriteLine($"ERRO: {ex.Message}");
-
-            Console.WriteLine($"Servidor configurado na porta {port}");
-            Console.WriteLine("Pressione Ctrl+C para encerrar o servidor");
-
-            // Registrar manipulador para fechar o servidor adequadamente
-            Console.CancelKeyPress += (sender, e) => {
-                e.Cancel = true;
-                server.Stop();
-                Environment.Exit(0);
+                Message = $"Gained {xpAmount} XP" + (leveledUp ? " and leveled up!" : ""),
+                Level = classProgress.Level,
+                Experience = classProgress.Experience,
+                ExperienceToNextLevel = xpForNextLevel,
+                XpGained = xpAmount,
+                Class = className,
+                LeveledUp = leveledUp,
+                NewSkillsLearned = newSkills,
+                StatBonuses = statBonuses
             };
 
-            await server.Start();
+            if (clients.TryGetValue(clientId, out var client))
+            {
+                await client.SendMessageAsync(JsonConvert.SerializeObject(response));
+            }
+        }
+
+        private double GetAverageEnemyLevel(Battle battle, string excludeTeamId)
+        {
+            var enemyPlayers = battle.Teams
+                .Where(t => t.Id != excludeTeamId)
+                .SelectMany(t => t.Players)
+                .Where(p => p.IsAlive);
+
+            return enemyPlayers.Any() ? enemyPlayers.Average(p => p.Level) : 1.0;
+        }
+
+        private int CalculateXpForNextLevel(int level)
+        {
+            return level * 100 + (level - 1) * 50;
         }
     }
 
-    [Serializable]
-    public class PlayerProgress
+    public class ClassProgress
     {
+        public string Class { get; set; }
         public int Level { get; set; } = 1;
         public int Experience { get; set; } = 0;
-        public string Class { get; set; }
-        
-        public PlayerProgress(string playerClass, int level = 1, int exp = 0)
+
+        public ClassProgress(string className)
         {
-            Class = playerClass;
-            Level = level;
-            Experience = exp;
+            Class = className;
         }
     }
 }

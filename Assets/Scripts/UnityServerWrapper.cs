@@ -8,14 +8,21 @@ namespace BattleSystem
 {
     public class UnityServerWrapper : MonoBehaviour
     {
-        [SerializeField] private bool startServerOnAwake = false;
+        [Header("Server Settings")]
         [SerializeField] private int serverPort = 7777;
-        [SerializeField] private bool enableServerLogging = true;
-
-        private BattleServer server;
-        private CancellationTokenSource serverCancellationToken;
-        private Task serverTask;
-
+        [SerializeField] private bool startServerOnAwake = true;
+        [SerializeField] private bool logToConsole = true;
+        
+        [Header("Status")]
+        [SerializeField] private bool isServerRunning;
+        [SerializeField] private string serverStatus = "Stopped";
+        
+        private BattleServer battleServer;
+        private bool isInitialized = false;
+        
+        public event Action<string> OnServerLog;
+        public event Action<bool> OnServerStatusChanged;
+        
         private void Awake()
         {
             if (startServerOnAwake)
@@ -23,61 +30,113 @@ namespace BattleSystem
                 StartServer();
             }
         }
-
-        public void StartServer()
+        
+        public async void StartServer()
         {
-            if (server != null)
+            if (isServerRunning)
             {
-                Debug.LogWarning("Servidor já está em execução");
+                LogToConsole("Server is already running");
                 return;
             }
 
-            server = new BattleServer(serverPort);
-            serverCancellationToken = new CancellationTokenSource();
-
-            if (enableServerLogging)
+            try
             {
-                server.OnLog += (message) => Debug.Log($"[BattleServer] {message}");
-                server.OnError += (exception) => Debug.LogError($"[BattleServer] {exception.Message}");
+                serverStatus = "Starting...";
+                OnServerStatusChanged?.Invoke(false);
+
+                battleServer = new BattleServer(serverPort);
+                
+                // Subscribe to server events if available
+                // battleServer.OnLog += (message) => LogToConsole($"[Server] {message}");
+                
+                LogToConsole($"Starting server on port {serverPort}...");
+                
+                // Start server in background
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await battleServer.Start();
+                    }
+                    catch (Exception ex)
+                    {
+                        LogToConsole($"Server error: {ex.Message}");
+                    }
+                });
+
+                // Give server time to initialize
+                await Task.Delay(1000);
+
+                isServerRunning = true;
+                serverStatus = $"Running on port {serverPort}";
+                OnServerStatusChanged?.Invoke(true);
+                
+                LogToConsole("Server started successfully");
             }
-
-            // Iniciar servidor em uma task separada
-            serverTask = Task.Run(async () => {
-                try
-                {
-                    await server.Start();
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"Erro ao iniciar servidor: {ex.Message}");
-                }
-            }, serverCancellationToken.Token);
-
-            Debug.Log($"Servidor iniciado na porta {serverPort}");
+            catch (Exception ex)
+            {
+                serverStatus = $"Failed to start: {ex.Message}";
+                LogToConsole($"Failed to start server: {ex.Message}");
+                OnServerStatusChanged?.Invoke(false);
+            }
         }
 
         public void StopServer()
         {
-            if (server == null)
-            {
-                Debug.LogWarning("Servidor não está em execução");
-                return;
-            }
+            if (!isServerRunning) return;
 
-            server.Stop();
-            serverCancellationToken.Cancel();
-            server = null;
-            Debug.Log("Servidor encerrado");
+            try
+            {
+                battleServer?.Stop();
+                isServerRunning = false;
+                serverStatus = "Stopped";
+                OnServerStatusChanged?.Invoke(false);
+                LogToConsole("Server stopped");
+            }
+            catch (Exception ex)
+            {
+                LogToConsole($"Error stopping server: {ex.Message}");
+            }
         }
 
-        public bool IsServerRunning()
+        private void LogToConsole(string message)
         {
-            return server != null && serverTask != null && !serverTask.IsCompleted;
+            if (logToConsole)
+            {
+                Debug.Log($"[UnityServerWrapper] {message}");
+            }
+            OnServerLog?.Invoke(message);
         }
 
         private void OnDestroy()
         {
             StopServer();
+        }
+        
+        // Public properties for inspector display
+        public bool IsServerRunning => isServerRunning;
+        public string ServerStatus => serverStatus;
+        public int Port => serverPort;
+        
+        // Unity Editor methods for testing
+        [ContextMenu("Start Server")]
+        private void StartServerContext()
+        {
+            StartServer();
+        }
+        
+        [ContextMenu("Stop Server")]
+        private void StopServerContext()
+        {
+            StopServer();
+        }
+        
+        [ContextMenu("Restart Server")]
+        private void RestartServerContext()
+        {
+            StopServer();
+            // Wait a moment before restarting
+            Invoke(nameof(StartServer), 1f);
         }
     }
 }

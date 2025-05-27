@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace BattleSystem
 {
@@ -12,272 +13,201 @@ namespace BattleSystem
         public int Mana { get; set; }
         public int MaxMana { get; set; }
         public List<Skill> Skills { get; set; } = new List<Skill>();
-        
-        // Experiência necessária para subir de nível
-        public int ExperienceToNextLevel => Level * 100;
-        
-        // Método para adicionar experiência e verificar level up
-        public bool AddExperience(int amount)
+        public PlayerStats BaseStats { get; set; } = new PlayerStats();
+
+        // Session statistics
+        public DateTime SessionStartTime { get; set; } = DateTime.Now;
+        public int SessionBattlesWon { get; set; } = 0;
+        public int SessionBattlesLost { get; set; } = 0;
+        public int SessionDamageDealt { get; set; } = 0;
+        public int SessionHealingDone { get; set; } = 0;
+
+        public int ExperienceToNextLevel => CalculateExpToNextLevel(Level);
+        public TimeSpan SessionDuration => DateTime.Now - SessionStartTime;
+
+        // Calculate experience required for next level with progressive scaling
+        private int CalculateExpToNextLevel(int level)
         {
-            Experience += amount;
-            bool leveledUp = false;
-            
-            // Verifica se subiu de nível
-            while (Experience >= ExperienceToNextLevel)
+            return 50 + (level * 50);
+        }
+
+        public ClassMasteryInfo GetClassMastery()
+        {
+            return new ClassMasteryInfo
             {
-                LevelUp();
-                leveledUp = true;
-            }
-            
-            return leveledUp;
+                Class = Class,
+                Level = Level,
+                Experience = Experience,
+                ExperienceToNextLevel = ExperienceToNextLevel,
+                SessionDuration = SessionDuration,
+                BattlesWon = SessionBattlesWon,
+                BattlesLost = SessionBattlesLost,
+                WinRate = SessionBattlesWon + SessionBattlesLost > 0 ?
+                    (float)SessionBattlesWon / (SessionBattlesWon + SessionBattlesLost) * 100 : 0,
+                TotalDamageDealt = SessionDamageDealt,
+                TotalHealingDone = SessionHealingDone
+            };
         }
-        
-        // Método para subir de nível com bônus específicos por classe
-        private void LevelUp()
-        {
-            Level++;
-            
-            // Bônus específicos por classe
-            switch (Class.ToLower())
-            {
-                case "warrior":
-                    // Warrior ganha mais HP e Ataque por nível
-                    MaxHealth += 30;
-                    Health += 30;
-                    Attack += 5;
-                    Defense += 3;
-                    MaxMana += 5;
-                    Mana += 5;
-                    
-                    // Adiciona novas habilidades em níveis específicos
-                    if (Level == 3 && !HasSkill("skill_warrior_slam"))
-                    {
-                        Skills.Add(new Skill
-                        {
-                            Id = "skill_warrior_slam",
-                            Name = "Golpe Esmagador",
-                            Description = "Ataca vários inimigos próximos",
-                            Damage = 80,
-                            ManaCost = 25,
-                            Range = 1,
-                            AffectsTeam = true
-                        });
-                    }
-                    if (Level == 5 && !HasSkill("skill_warrior_berserk"))
-                    {
-                        Skills.Add(new Skill
-                        {
-                            Id = "skill_warrior_berserk",
-                            Name = "Fúria Guerreira",
-                            Description = "Aumenta o ataque em troca de defesa",
-                            Damage = 0,
-                            ManaCost = 30,
-                            Range = 0
-                        });
-                    }
-                    break;
-                    
-                case "mage":
-                    // Mage ganha mais Mana e poder mágico (dano) por nível
-                    MaxHealth += 15;
-                    Health += 15;
-                    Attack += 2;
-                    Defense += 1;
-                    MaxMana += 20;
-                    Mana += 20;
-                    
-                    // Aumenta o dano de todas as habilidades existentes
-                    foreach (var skill in Skills)
-                    {
-                        if (skill.Damage > 0)
-                        {
-                            skill.Damage += 5;
-                        }
-                    }
-                    
-                    // Adiciona novas habilidades em níveis específicos
-                    if (Level == 3 && !HasSkill("skill_mage_frostbolt"))
-                    {
-                        Skills.Add(new Skill
-                        {
-                            Id = "skill_mage_frostbolt",
-                            Name = "Raio de Gelo",
-                            Description = "Dispara um raio congelante",
-                            Damage = 90,
-                            ManaCost = 25,
-                            Range = 3
-                        });
-                    }
-                    if (Level == 5 && !HasSkill("skill_mage_meteor"))
-                    {
-                        Skills.Add(new Skill
-                        {
-                            Id = "skill_mage_meteor",
-                            Name = "Chuva de Meteoros",
-                            Description = "Invoca meteoros que atingem todos os inimigos",
-                            Damage = 150,
-                            ManaCost = 50,
-                            Range = 4,
-                            AffectsTeam = true
-                        });
-                    }
-                    break;
-                    
-                case "healer":
-                    // Healer ganha equilíbrio entre HP/MP e poder de cura
-                    MaxHealth += 20;
-                    Health += 20;
-                    Attack += 1;
-                    Defense += 2;
-                    MaxMana += 15;
-                    Mana += 15;
-                    
-                    // Aumenta a cura de todas as habilidades existentes
-                    foreach (var skill in Skills)
-                    {
-                        if (skill.Healing > 0)
-                        {
-                            skill.Healing += 8;
-                        }
-                    }
-                    
-                    // Adiciona novas habilidades em níveis específicos
-                    if (Level == 3 && !HasSkill("skill_healer_mass_heal"))
-                    {
-                        Skills.Add(new Skill
-                        {
-                            Id = "skill_healer_mass_heal",
-                            Name = "Cura em Massa",
-                            Description = "Cura todos os aliados próximos",
-                            Healing = 70,
-                            ManaCost = 35,
-                            Range = 3,
-                            AffectsTeam = true
-                        });
-                    }
-                    if (Level == 5 && !HasSkill("skill_healer_resurrection"))
-                    {
-                        Skills.Add(new Skill
-                        {
-                            Id = "skill_healer_resurrection",
-                            Name = "Ressurreição",
-                            Description = "Revive um aliado caído com parte da vida",
-                            Healing = 150,
-                            ManaCost = 60,
-                            Range = 2
-                        });
-                    }
-                    break;
-                    
-                default:
-                    // Classe padrão - crescimento balanceado
-                    MaxHealth += 20;
-                    Health += 20;
-                    Attack += 3;
-                    Defense += 2;
-                    MaxMana += 10;
-                    Mana += 10;
-                    break;
-            }
-        }
-        
-        // Verifica se o jogador já possui determinada habilidade
-        private bool HasSkill(string skillId)
-        {
-            return Skills.Exists(s => s.Id == skillId);
-        }
-        
+
         public static Player CreatePlayer(string id, string name, string characterClass)
         {
             var player = new Player
             {
                 Id = id,
                 Name = name,
-                Class = characterClass
+                Class = characterClass,
+                Level = 1,
+                Experience = 0,
+                SessionStartTime = DateTime.Now
             };
-            
-            // Configurações iniciais baseadas na classe
+
+            // Inicializar estatísticas com base na classe
             switch (characterClass.ToLower())
             {
                 case "warrior":
-                    player.Health = 500;
-                    player.MaxHealth = 500;
-                    player.Attack = 80;
-                    player.Defense = 70;
+                    player.MaxHealth = 150;
+                    player.Health = 150;
+                    player.MaxMana = 50;
+                    player.Mana = 50;
+                    player.Attack = 70;
+                    player.Defense = 60;
                     player.Speed = 50;
-                    player.Mana = 100;
-                    player.MaxMana = 100;
-                    player.Skills.Add(new Skill 
-                    { 
-                        Id = "skill_warrior_strike", 
-                        Name = "Golpe Poderoso", 
-                        Description = "Um ataque forte que causa dano elevado",
-                        Damage = 100,
-                        ManaCost = 20,
-                        Range = 1
-                    });
                     break;
-                    
+
                 case "mage":
-                    player.Health = 300;
-                    player.MaxHealth = 300;
-                    player.Attack = 40;
-                    player.Defense = 30;
-                    player.Speed = 60;
-                    player.Mana = 300;
-                    player.MaxMana = 300;
-                    player.Skills.Add(new Skill 
-                    { 
-                        Id = "skill_mage_fireball", 
-                        Name = "Bola de Fogo", 
-                        Description = "Lança uma poderosa bola de fogo",
-                        Damage = 120,
-                        ManaCost = 30,
-                        Range = 3
-                    });
-                    break;
-                    
-                case "healer":
-                    player.Health = 350;
-                    player.MaxHealth = 350;
-                    player.Attack = 30;
-                    player.Defense = 40;
-                    player.Speed = 55;
-                    player.Mana = 250;
-                    player.MaxMana = 250;
-                    player.Skills.Add(new Skill 
-                    { 
-                        Id = "skill_healer_heal", 
-                        Name = "Cura", 
-                        Description = "Restaura a vida de um aliado",
-                        Healing = 100,
-                        ManaCost = 25,
-                        Range = 2
-                    });
-                    break;
-                    
-                default:
-                    // Classe padrão - Aventureiro
-                    player.Health = 400;
-                    player.MaxHealth = 400;
+                    player.MaxHealth = 100;
+                    player.Health = 100;
+                    player.MaxMana = 120;
+                    player.Mana = 120;
                     player.Attack = 60;
+                    player.Defense = 30;
+                    player.Speed = 70;
+                    break;
+
+                case "healer":
+                    player.MaxHealth = 120;
+                    player.Health = 120;
+                    player.MaxMana = 100;
+                    player.Mana = 100;
+                    player.Attack = 40;
                     player.Defense = 50;
                     player.Speed = 60;
-                    player.Mana = 150;
-                    player.MaxMana = 150;
-                    player.Skills.Add(new Skill 
-                    { 
-                        Id = "skill_adventurer_slash", 
-                        Name = "Corte Rápido", 
-                        Description = "Um ataque rápido que causa dano moderado",
-                        Damage = 70,
-                        ManaCost = 15,
-                        Range = 1
-                    });
+                    break;
+
+                default:
+                    player.MaxHealth = 100;
+                    player.Health = 100;
+                    player.MaxMana = 100;
+                    player.Mana = 100;
+                    player.Attack = 50;
+                    player.Defense = 50;
+                    player.Speed = 50;
                     break;
             }
-            
+
             return player;
         }
+
+        public void RecordBattleResult(bool won, int damageDealt = 0, int healingDone = 0)
+        {
+            if (won)
+                SessionBattlesWon++;
+            else
+                SessionBattlesLost++;
+
+            SessionDamageDealt += damageDealt;
+            SessionHealingDone += healingDone;
+        }
+
+        public void ResetSession()
+        {
+            SessionStartTime = DateTime.Now;
+            SessionBattlesWon = 0;
+            SessionBattlesLost = 0;
+            SessionDamageDealt = 0;
+            SessionHealingDone = 0;
+        }
+
+        // Método para regenerar mana por turno
+        public void RegenerateMana(int amount)
+        {
+            Mana = Math.Min(MaxMana, Mana + amount);
+        }
+
+        // Método para consumir mana ao usar habilidades
+        public bool UseMana(int amount)
+        {
+            if (Mana < amount)
+                return false;
+
+            Mana -= amount;
+            return true;
+        }
+
+        // Método para ganhar experiência
+        public bool GainExperience(int amount)
+        {
+            Experience += amount;
+            bool leveledUp = false;
+
+            // Verificar se subiu de nível
+            int xpForNextLevel = CalculateExpToNextLevel(Level);
+            while (Experience >= xpForNextLevel)
+            {
+                Experience -= xpForNextLevel;
+                Level++;
+                leveledUp = true;
+
+                // Atualizar xp necessária para o próximo nível
+                xpForNextLevel = CalculateExpToNextLevel(Level);
+            }
+
+            return leveledUp;
+        }
+    }
+
+    [Serializable]
+    public class ClassMasteryInfo
+    {
+        public string Class { get; set; }
+        public int Level { get; set; }
+        public int Experience { get; set; }
+        public int ExperienceToNextLevel { get; set; }
+        public TimeSpan SessionDuration { get; set; }
+        public int BattlesWon { get; set; }
+        public int BattlesLost { get; set; }
+        public float WinRate { get; set; }
+        public int TotalDamageDealt { get; set; }
+        public int TotalHealingDone { get; set; }
+    }
+
+    [Serializable]
+    public class PlayerStats
+    {
+        public int Strength { get; set; }
+        public int Intelligence { get; set; }
+        public int Wisdom { get; set; }
+        public int Constitution { get; set; }
+        public int Agility { get; set; }
+        public int Luck { get; set; }
+    }
+
+    [Serializable]
+    public class ClassConfiguration
+    {
+        public string Name { get; set; }
+        public int BaseHealth { get; set; }
+        public int BaseMana { get; set; }
+        public int BaseAttack { get; set; }
+        public int BaseDefense { get; set; }
+        public int BaseSpeed { get; set; }
+        public int HealthPerLevel { get; set; }
+        public int ManaPerLevel { get; set; }
+        public int AttackPerLevel { get; set; }
+        public int DefensePerLevel { get; set; }
+        public int SpeedPerLevel { get; set; }
+        public Dictionary<string, int> StartingAttributes { get; set; } = new Dictionary<string, int>();
+        public Dictionary<string, int> AttributeGains { get; set; } = new Dictionary<string, int>();
+        public Dictionary<int, List<Skill>> SkillsByLevel { get; set; } = new Dictionary<int, List<Skill>>();
     }
 }

@@ -1,19 +1,21 @@
-﻿using Newtonsoft.Json;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net.Sockets;
-using System.Text;
-using System.Threading.Tasks;
-using TMPro;
-using UnityEngine;
+﻿using UnityEngine;
 using UnityEngine.UI;
+using TMPro;
+using System.Collections.Generic;
+using System.Net.Sockets;
+using System.IO;
+using System.Text;
+using Newtonsoft.Json;
+using System;
+using System.Linq;
+using System.Threading.Tasks;
 
 namespace BattleSystem
 {
-
     public class BattleTestClient : MonoBehaviour
     {
+        #region Campos Serializados
+
         [Header("Configurações de Conexão")]
         [SerializeField] private string serverIp = "127.0.0.1";
         [SerializeField] private int serverPort = 7777;
@@ -40,13 +42,10 @@ namespace BattleSystem
         [SerializeField] private Button addEnemyButton;
         [SerializeField] private TextMeshProUGUI selectedEnemiesText;
 
-        private bool isTeamReady = false;
-
         [Header("UI - Preparação")]
         [SerializeField] private Button toggleReadyButton;
         [SerializeField] private TextMeshProUGUI readyStatusText;
         [SerializeField] private TextMeshProUGUI roomCodeText;
-
 
         [Header("UI - Ações de Batalha")]
         [SerializeField] private Button attackButton;
@@ -62,16 +61,14 @@ namespace BattleSystem
         [SerializeField] private TextMeshProUGUI logText;
 
         [Header("UI - Painéis")]
-        [SerializeField] private GameObject connectPanel;      // Painel de conexão
-        [SerializeField] private GameObject lobbyPanel;        // Painel de lobby (criar/entrar em batalha)
-        [SerializeField] private GameObject preparationPanel;  // Painel de preparação (equipes/inimigos)
-        [SerializeField] private GameObject battlePanel;       // Painel de batalha (ações/alvos)
-        [SerializeField] private GameObject endBattlePanel;    // Painel de fim de batalha (resultados)
+        [SerializeField] private GameObject connectPanel;
+        [SerializeField] private GameObject lobbyPanel;
+        [SerializeField] private GameObject preparationPanel;
+        [SerializeField] private GameObject battlePanel;
+        [SerializeField] private GameObject endBattlePanel;
 
-        // Adicione essas variáveis na classe
         [Header("UI - Modo de Batalha")]
         [SerializeField] private TMP_Dropdown battleModeDropdown;
-        private BattleMode currentBattleMode = BattleMode.PvE;
 
         [Header("UI - Seleção de Equipe")]
         [SerializeField] private TMP_Dropdown teamSelectionDropdown;
@@ -79,7 +76,20 @@ namespace BattleSystem
         [SerializeField] private Button createTeamButton;
         [SerializeField] private Button refreshTeamsButton;
         [SerializeField] private Button joinTeamButton;
-        private Dictionary<string, string> teamIdNameMap = new Dictionary<string, string>();
+
+        [Header("UI - Progressão do Jogador")]
+        [SerializeField] private TextMeshProUGUI playerProgressText;
+        [SerializeField] private Button viewProgressButton;
+
+        [Header("UI - Retorno ao Lobby")]
+        [SerializeField] private Button returnToLobbyButton;
+
+        [Header("UI - Resultado da Batalha")]
+        [SerializeField] private TextMeshProUGUI battleResultText;
+
+        #endregion
+
+        #region Campos Privados
 
         private enum ClientState
         {
@@ -91,18 +101,15 @@ namespace BattleSystem
             BattleEnded
         }
 
-        // Adicione esta variável à classe
-        private ClientState currentState = ClientState.Disconnected;
-
-
-
         private enum BattleMode
         {
             PvE,  // Jogadores contra inimigos
             PvP   // Jogadores contra jogadores
         }
 
-
+        private ClientState currentState = ClientState.Disconnected;
+        private BattleMode currentBattleMode = BattleMode.PvE;
+        private bool isTeamReady = false;
 
         // Informações da batalha
         private string battleId;
@@ -117,34 +124,103 @@ namespace BattleSystem
         private bool isConnected = false;
         private byte[] receiveBuffer = new byte[4096];
 
+        // Dicionários para mapear IDs e nomes
+        private Dictionary<string, string> teamIdNameMap = new Dictionary<string, string>();
+        private Dictionary<string, string> targetIdMap = new Dictionary<string, string>();
+        private Dictionary<string, string> skillIdMap = new Dictionary<string, string>();
+        private Dictionary<string, ClassMasteryInfo> localClassProgress = new Dictionary<string, ClassMasteryInfo>();
+
+        #endregion
+
+        #region Ciclo de Vida Unity
+
         private void Start()
         {
             InitializeUI();
-
-            // Inicializar estado inicial
             ChangeState(ClientState.Disconnected);
+
+            // Inicializar os dropdowns
+            InitializeDropdowns();
 
             if (autoConnectOnStart)
             {
                 Connect();
             }
-
-            // Populando o dropdown de classes de personagens
-            classDropdown.ClearOptions();
-            classDropdown.AddOptions(new List<string> { "warrior", "mage", "healer" });
-
-            // Populando o dropdown de inimigos
-            enemySelectionDropdown.ClearOptions();
-            enemySelectionDropdown.AddOptions(new List<string> {
-        "enemy_goblin", "enemy_orc", "enemy_necromancer", "enemy_dragon"
-    });
-
-            // Populando o dropdown de modos de batalha
-            battleModeDropdown.ClearOptions();
-            battleModeDropdown.AddOptions(new List<string> { "PvE (Jogadores vs Inimigos)", "PvP (Jogadores vs Jogadores)" });
-            battleModeDropdown.onValueChanged.AddListener(OnBattleModeChanged);
         }
 
+        private void OnDestroy()
+        {
+            Disconnect();
+        }
+
+        #endregion
+
+        #region Inicialização
+
+        private void InitializeUI()
+        {
+            // Configurar listeners para os botões
+            if (connectButton != null) connectButton.onClick.AddListener(Connect);
+            if (disconnectButton != null) disconnectButton.onClick.AddListener(Disconnect);
+            if (createBattleButton != null) createBattleButton.onClick.AddListener(CreateBattle);
+            if (joinBattleButton != null) joinBattleButton.onClick.AddListener(JoinBattle);
+            if (startBattleButton != null) startBattleButton.onClick.AddListener(StartBattle);
+            if (addEnemyButton != null) addEnemyButton.onClick.AddListener(AddEnemyToList);
+            if (attackButton != null) attackButton.onClick.AddListener(ExecuteAttack);
+            if (skillButton != null) skillButton.onClick.AddListener(ExecuteSkill);
+            if (passButton != null) passButton.onClick.AddListener(ExecutePass);
+            if (refreshStateButton != null) refreshStateButton.onClick.AddListener(GetBattleState);
+            if (createTeamButton != null) createTeamButton.onClick.AddListener(CreateTeam);
+            if (refreshTeamsButton != null) refreshTeamsButton.onClick.AddListener(RefreshTeams);
+            if (returnToLobbyButton != null) returnToLobbyButton.onClick.AddListener(ReturnToLobby);
+            if (joinTeamButton != null) joinTeamButton.onClick.AddListener(JoinSelectedTeam);
+            if (toggleReadyButton != null) toggleReadyButton.onClick.AddListener(ToggleTeamReady);
+            if (viewProgressButton != null) viewProgressButton.onClick.AddListener(ShowPlayerProgress);
+
+            // Configurar o listener do dropdown de modo de batalha
+            if (battleModeDropdown != null)
+                battleModeDropdown.onValueChanged.AddListener(OnBattleModeChanged);
+
+            // Desabilitar botões que requerem conexão
+            UpdateButtonsBasedOnState(ClientState.Disconnected);
+
+            // Estado inicial da UI
+            UpdateConnectionStatus("Desconectado");
+            LogMessage("Cliente de teste iniciado.");
+        }
+
+        private void InitializeDropdowns()
+        {
+            // Dropdown de classes
+            if (classDropdown != null)
+            {
+                classDropdown.ClearOptions();
+                classDropdown.AddOptions(new List<string> { "warrior", "mage", "healer" });
+            }
+
+            // Dropdown de inimigos
+            if (enemySelectionDropdown != null)
+            {
+                enemySelectionDropdown.ClearOptions();
+                enemySelectionDropdown.AddOptions(new List<string> {
+                    "enemy_goblin", "enemy_orc", "enemy_necromancer", "enemy_dragon"
+                });
+            }
+
+            // Dropdown de modos de batalha
+            if (battleModeDropdown != null)
+            {
+                battleModeDropdown.ClearOptions();
+                battleModeDropdown.AddOptions(new List<string> {
+                    "PvE (Jogadores vs Inimigos)",
+                    "PvP (Jogadores vs Jogadores)"
+                });
+            }
+        }
+
+        #endregion
+
+        #region Gerenciamento de Estado
 
         private void ChangeState(ClientState newState)
         {
@@ -153,109 +229,109 @@ namespace BattleSystem
 
             // Atualizar UI com base no novo estado
             UpdateUI();
-
-            // Atualizar interatividade dos botões conforme o estado
             UpdateButtonsBasedOnState(newState);
         }
-
-
-        private void UpdateButtonsBasedOnState(ClientState state)
-        {
-            // Primeiro desabilita tudo
-            connectButton.interactable = false;
-            disconnectButton.interactable = false;
-            createBattleButton.interactable = false;
-            joinBattleButton.interactable = false;
-            startBattleButton.interactable = false;
-            addEnemyButton.interactable = false;
-            attackButton.interactable = false;
-            skillButton.interactable = false;
-            passButton.interactable = false;
-            refreshStateButton.interactable = false;
-            createTeamButton.interactable = false;
-            refreshTeamsButton.interactable = false;
-            returnToLobbyButton.interactable = false;
-
-            // Habilita botões específicos com base no estado
-            switch (state)
-            {
-                case ClientState.Disconnected:
-                    connectButton.interactable = true;
-                    break;
-
-                case ClientState.Connected:
-                case ClientState.InLobby:
-                    disconnectButton.interactable = true;
-                    createBattleButton.interactable = true;
-                    joinBattleButton.interactable = true;
-                    break;
-
-                case ClientState.PreparingBattle:
-                    disconnectButton.interactable = true;
-                    startBattleButton.interactable = true;
-                    createTeamButton.interactable = true;
-                    refreshTeamsButton.interactable = true;
-                    joinTeamButton.interactable = true;
-
-                    // No modo PvE, os botões de adicionar inimigos devem estar habilitados
-                    if (currentBattleMode == BattleMode.PvE)
-                    {
-                        addEnemyButton.interactable = true;
-                    }
-                    break;
-
-                case ClientState.InBattle:
-                    disconnectButton.interactable = true;
-                    attackButton.interactable = true;
-                    skillButton.interactable = true;
-                    passButton.interactable = true;
-                    refreshStateButton.interactable = true;
-                    break;
-
-                case ClientState.BattleEnded:
-                    disconnectButton.interactable = true;
-                    returnToLobbyButton.interactable = true;
-                    break;
-            }
-        }
-
 
         private void UpdateUI()
         {
             // Esconder todos os painéis
-            connectPanel.SetActive(false);
-            lobbyPanel.SetActive(false);
-            preparationPanel.SetActive(false);
-            battlePanel.SetActive(false);
-            endBattlePanel.SetActive(false);
+            if (connectPanel != null) connectPanel.SetActive(false);
+            if (lobbyPanel != null) lobbyPanel.SetActive(false);
+            if (preparationPanel != null) preparationPanel.SetActive(false);
+            if (battlePanel != null) battlePanel.SetActive(false);
+            if (endBattlePanel != null) endBattlePanel.SetActive(false);
 
             // Mostrar apenas o painel relevante para o estado atual
             switch (currentState)
             {
                 case ClientState.Disconnected:
-                    connectPanel.SetActive(true);
+                    if (connectPanel != null) connectPanel.SetActive(true);
                     break;
 
                 case ClientState.Connected:
                 case ClientState.InLobby:
-                    lobbyPanel.SetActive(true);
+                    if (lobbyPanel != null) lobbyPanel.SetActive(true);
                     break;
 
                 case ClientState.PreparingBattle:
-                    preparationPanel.SetActive(true);
+                    if (preparationPanel != null) preparationPanel.SetActive(true);
                     break;
 
                 case ClientState.InBattle:
-                    battlePanel.SetActive(true);
+                    if (battlePanel != null) battlePanel.SetActive(true);
                     break;
 
                 case ClientState.BattleEnded:
-                    endBattlePanel.SetActive(true);
+                    if (endBattlePanel != null) endBattlePanel.SetActive(true);
                     break;
             }
         }
 
+        private void UpdateButtonsBasedOnState(ClientState state)
+        {
+            // Desabilitar todos os botões primeiro
+            if (connectButton != null) connectButton.interactable = false;
+            if (disconnectButton != null) disconnectButton.interactable = false;
+            if (createBattleButton != null) createBattleButton.interactable = false;
+            if (joinBattleButton != null) joinBattleButton.interactable = false;
+            if (startBattleButton != null) startBattleButton.interactable = false;
+            if (addEnemyButton != null) addEnemyButton.interactable = false;
+            if (attackButton != null) attackButton.interactable = false;
+            if (skillButton != null) skillButton.interactable = false;
+            if (passButton != null) passButton.interactable = false;
+            if (refreshStateButton != null) refreshStateButton.interactable = false;
+            if (createTeamButton != null) createTeamButton.interactable = false;
+            if (refreshTeamsButton != null) refreshTeamsButton.interactable = false;
+            if (joinTeamButton != null) joinTeamButton.interactable = false;
+            if (returnToLobbyButton != null) returnToLobbyButton.interactable = false;
+            if (toggleReadyButton != null) toggleReadyButton.interactable = false;
 
+            // Ativar botões relevantes para o estado atual
+            switch (state)
+            {
+                case ClientState.Disconnected:
+                    if (connectButton != null) connectButton.interactable = true;
+                    break;
+
+                case ClientState.Connected:
+                case ClientState.InLobby:
+                    if (disconnectButton != null) disconnectButton.interactable = true;
+                    if (createBattleButton != null) createBattleButton.interactable = true;
+                    if (joinBattleButton != null) joinBattleButton.interactable = true;
+                    break;
+
+                case ClientState.PreparingBattle:
+                    if (disconnectButton != null) disconnectButton.interactable = true;
+                    if (startBattleButton != null) startBattleButton.interactable = true;
+                    if (createTeamButton != null) createTeamButton.interactable = true;
+                    if (refreshTeamsButton != null) refreshTeamsButton.interactable = true;
+                    if (joinTeamButton != null) joinTeamButton.interactable = true;
+                    if (toggleReadyButton != null) toggleReadyButton.interactable = true;
+                    if (currentBattleMode == BattleMode.PvE && addEnemyButton != null)
+                        addEnemyButton.interactable = true;
+                    break;
+
+                case ClientState.InBattle:
+                    if (disconnectButton != null) disconnectButton.interactable = true;
+                    if (refreshStateButton != null) refreshStateButton.interactable = true;
+
+                    // Botões de ação só estão ativos no turno do jogador (verificado em UpdateBattleStateUI)
+                    bool isPlayerTurn = currentBattle != null && currentBattle.CurrentParticipant == playerId;
+                    if (attackButton != null) attackButton.interactable = isPlayerTurn;
+                    if (skillButton != null) skillButton.interactable = isPlayerTurn;
+                    if (passButton != null) passButton.interactable = isPlayerTurn;
+                    break;
+
+                case ClientState.BattleEnded:
+                    if (disconnectButton != null) disconnectButton.interactable = true;
+                    if (returnToLobbyButton != null) returnToLobbyButton.interactable = true;
+                    break;
+            }
+        }
+
+        #endregion
+
+        #region Eventos de UI
 
         private void OnBattleModeChanged(int index)
         {
@@ -264,67 +340,80 @@ namespace BattleSystem
 
             // Atualizar visibilidade de controles baseado no modo
             bool isPvE = currentBattleMode == BattleMode.PvE;
-            enemySelectionDropdown.gameObject.SetActive(isPvE);
-            addEnemyButton.gameObject.SetActive(isPvE);
+            if (enemySelectionDropdown != null) enemySelectionDropdown.gameObject.SetActive(isPvE);
+            if (addEnemyButton != null) addEnemyButton.gameObject.SetActive(isPvE);
 
             // Atualizar interatividade dos botões para o estado atual
             UpdateButtonsBasedOnState(currentState);
         }
 
-
-        [Header("UI - Fim de Batalha")]
-        [SerializeField] private TextMeshProUGUI battleResultText;
-        [SerializeField] private Button returnToLobbyButton;
-        private void InitializeUI()
-        {
-            connectButton.onClick.AddListener(Connect);
-            disconnectButton.onClick.AddListener(Disconnect);
-            createBattleButton.onClick.AddListener(CreateBattle);
-            joinBattleButton.onClick.AddListener(JoinBattle);
-            startBattleButton.onClick.AddListener(StartBattle);
-            addEnemyButton.onClick.AddListener(AddEnemyToList);
-            attackButton.onClick.AddListener(ExecuteAttack);
-            skillButton.onClick.AddListener(ExecuteSkill);
-            passButton.onClick.AddListener(ExecutePass);
-            refreshStateButton.onClick.AddListener(GetBattleState);
-            createTeamButton.onClick.AddListener(CreateTeam);
-            refreshTeamsButton.onClick.AddListener(RefreshTeams);
-            returnToLobbyButton.onClick.AddListener(ReturnToLobby);
-            joinTeamButton.onClick.AddListener(JoinSelectedTeam);
-            toggleReadyButton.onClick.AddListener(ToggleTeamReady);
-
-            // Desabilitar botões que requerem conexão
-            UpdateButtonsBasedOnState(ClientState.Disconnected);
-
-            // Estado inicial da UI
-            UpdateConnectionStatus("Desconectado");
-            LogMessage("Cliente de teste iniciado.");
-
-
-        }
+        #endregion
 
         #region Conexão com o Servidor
 
         public async void Connect()
         {
+            if (isConnected)
+            {
+                LogMessage("Já está conectado ao servidor");
+                return;
+            }
+
             try
             {
+                LogMessage($"Tentando conectar ao servidor: {serverIp}:{serverPort}...");
+                UpdateConnectionStatus("Conectando...");
+
+                // Criar nova instância do TcpClient
                 tcpClient = new TcpClient();
-                await tcpClient.ConnectAsync(serverIp, serverPort);
+
+                // Definir timeout para a conexão
+                var connectTask = tcpClient.ConnectAsync(serverIp, serverPort);
+                var timeoutTask = Task.Delay(5000); // Timeout de 5 segundos
+
+                // Aguardar a conexão ou o timeout
+                var completedTask = await Task.WhenAny(connectTask, timeoutTask);
+
+                if (completedTask == timeoutTask)
+                {
+                    // Timeout ocorreu
+                    throw new TimeoutException("Tempo de conexão esgotado");
+                }
+
+                // Garantir que a tarefa de conexão completou sem exceções
+                await connectTask;
+
+                // Verificar se a conexão foi estabelecida
+                if (!tcpClient.Connected)
+                {
+                    throw new Exception("Falha ao estabelecer conexão");
+                }
+
+                // Obter o stream para comunicação
                 stream = tcpClient.GetStream();
                 isConnected = true;
 
                 UpdateConnectionStatus("Conectado");
                 LogMessage("Conectado com sucesso ao servidor.");
 
-                // Mudar para o estado Connected - ADICIONAR ESTA LINHA
+                // Mudar para o estado Connected
                 ChangeState(ClientState.Connected);
 
-                // Inicia a leitura contínua de mensagens
+                // Inicia a leitura contínua de mensagens em uma task separada
                 _ = ListenForMessages();
             }
             catch (Exception ex)
             {
+                // Fechar recursos se necessário
+                if (tcpClient != null && tcpClient.Connected)
+                {
+                    tcpClient.Close();
+                }
+
+                tcpClient = null;
+                stream = null;
+                isConnected = false;
+
                 UpdateConnectionStatus($"Erro: {ex.Message}");
                 LogMessage($"Falha ao conectar: {ex.Message}");
                 ChangeState(ClientState.Disconnected);
@@ -335,69 +424,186 @@ namespace BattleSystem
         {
             if (!isConnected) return;
 
-            isConnected = false;
-            stream?.Close();
-            tcpClient?.Close();
+            LogMessage("Desconectando do servidor...");
 
-            UpdateConnectionStatus("Desconectado");
-            LogMessage("Desconectado do servidor.");
+            try
+            {
+                // Marcar como desconectado primeiro para parar o loop de leitura
+                isConnected = false;
 
-            // Limpar dados da batalha
-            battleId = null;
-            playerId = null;
-            teamId = null;
-            selectedEnemyIds.Clear();
-            currentBattle = null;
+                // Fechar recursos de rede
+                if (stream != null)
+                {
+                    stream.Close();
+                    stream = null;
+                }
 
-            // Atualizar UI
-            battleIdInputField.text = "";
-            playerIdText.text = "Player ID: N/A";
-            battleStateText.text = "N/A";
-            currentTurnText.text = "N/A";
-            selectedEnemiesText.text = "";
+                if (tcpClient != null)
+                {
+                    tcpClient.Close();
+                    tcpClient = null;
+                }
 
-            // Mudar para o estado desconectado - ADICIONAR ESTA LINHA
-            ChangeState(ClientState.Disconnected);
+                UpdateConnectionStatus("Desconectado");
+                LogMessage("Desconectado do servidor.");
+
+                // Limpar dados da batalha
+                battleId = null;
+                playerId = null;
+                teamId = null;
+                selectedEnemyIds.Clear();
+                currentBattle = null;
+
+                // Resetar campos da UI
+                if (battleIdInputField != null) battleIdInputField.text = "";
+                if (playerIdText != null) playerIdText.text = "Player ID: N/A";
+                if (battleStateText != null) battleStateText.text = "N/A";
+                if (currentTurnText != null) currentTurnText.text = "N/A";
+                if (selectedEnemiesText != null) selectedEnemiesText.text = "";
+
+                // Mudar para o estado desconectado
+                ChangeState(ClientState.Disconnected);
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"Erro ao desconectar: {ex.Message}");
+            }
         }
+
         private async Task ListenForMessages()
         {
-            while (isConnected)
+            LogMessage("Iniciando ciclo de escuta de mensagens");
+
+            while (isConnected && tcpClient != null && tcpClient.Connected)
             {
                 try
                 {
-                    int bytesRead = await stream.ReadAsync(receiveBuffer, 0, receiveBuffer.Length);
-                    if (bytesRead <= 0)
+                    // Verifica se o stream está disponível
+                    if (stream == null || !tcpClient.Connected)
                     {
+                        LogMessage("Stream não disponível. Desconectando...");
                         Disconnect();
                         break;
                     }
 
-                    string message = Encoding.UTF8.GetString(receiveBuffer, 0, bytesRead);
-                    ProcessMessage(message);
+                    // Configurar um CancellationTokenSource com timeout para evitar bloqueios indefinidos
+                    using (var cts = new System.Threading.CancellationTokenSource(30000)) // 30 segundos de timeout
+                    {
+                        // Ler dados do stream com timeout
+                        int bytesRead = await stream.ReadAsync(receiveBuffer, 0, receiveBuffer.Length, cts.Token);
+
+                        // Se não recebeu dados, o servidor provavelmente desconectou
+                        if (bytesRead <= 0)
+                        {
+                            LogMessage("Conexão fechada pelo servidor (0 bytes recebidos)");
+                            Disconnect();
+                            break;
+                        }
+
+                        // Processar a mensagem recebida
+                        string message = Encoding.UTF8.GetString(receiveBuffer, 0, bytesRead);
+                        ProcessMessage(message);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Timeout na leitura
+                    LogMessage("Timeout na leitura de dados. Verificando conexão...");
+
+                    // Verificar se o cliente ainda está conectado
+                    if (tcpClient != null && tcpClient.Connected)
+                    {
+                        // A conexão ainda está ativa, continuar o loop
+                        continue;
+                    }
+                    else
+                    {
+                        LogMessage("Conexão perdida durante timeout");
+                        Disconnect();
+                        break;
+                    }
+                }
+                catch (IOException ex)
+                {
+                    // Erro de IO geralmente significa que a conexão foi fechada
+                    LogMessage($"Erro de IO: {ex.Message}");
+                    Disconnect();
+                    break;
+                }
+                catch (ObjectDisposedException)
+                {
+                    // O stream ou cliente foi fechado durante a operação
+                    LogMessage("Objeto de conexão foi fechado");
+                    isConnected = false;
+                    break;
                 }
                 catch (Exception ex)
                 {
-                    if (isConnected)
+                    // Outros erros
+                    LogMessage($"Erro ao receber mensagem: {ex.Message}");
+
+                    // Verificar se ainda estamos conectados após o erro
+                    if (isConnected && tcpClient != null && tcpClient.Connected)
                     {
-                        LogMessage($"Erro ao receber mensagem: {ex.Message}");
-                        Disconnect();
+                        // Erro recuperável, continuar o loop
+                        continue;
                     }
-                    break;
+                    else
+                    {
+                        // Erro não recuperável
+                        Disconnect();
+                        break;
+                    }
                 }
+            }
+
+            LogMessage("Ciclo de escuta de mensagens finalizado");
+
+            // Garantir que o estado de desconexão seja aplicado
+            if (isConnected)
+            {
+                Disconnect();
             }
         }
 
         private async Task SendMessage(object request)
         {
-            if (!isConnected) return;
+            if (!isConnected || stream == null)
+            {
+                LogMessage("Não é possível enviar mensagem: não conectado");
+                return;
+            }
 
             try
             {
+                // Serializar a requisição para JSON
                 string json = JsonConvert.SerializeObject(request);
                 LogMessage($"Enviando: {json}");
 
+                // Converter para bytes e enviar
                 byte[] data = Encoding.UTF8.GetBytes(json);
-                await stream.WriteAsync(data, 0, data.Length);
+
+                // Usar um CancellationTokenSource para definir timeout no envio
+                using (var cts = new System.Threading.CancellationTokenSource(10000)) // 10 segundos de timeout
+                {
+                    await stream.WriteAsync(data, 0, data.Length, cts.Token);
+                    await stream.FlushAsync(cts.Token); // Garantir que os dados sejam enviados imediatamente
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                LogMessage("Timeout ao enviar mensagem");
+                Disconnect();
+            }
+            catch (IOException ex)
+            {
+                LogMessage($"Erro de IO ao enviar mensagem: {ex.Message}");
+                Disconnect();
+            }
+            catch (ObjectDisposedException)
+            {
+                LogMessage("Tentativa de envio em conexão fechada");
+                isConnected = false;
             }
             catch (Exception ex)
             {
@@ -407,7 +613,6 @@ namespace BattleSystem
         }
 
         #endregion
-
         #region Processamento de Mensagens
 
         private void ProcessMessage(string message)
@@ -416,7 +621,6 @@ namespace BattleSystem
             {
                 LogMessage($"Recebido: {message}");
 
-                // Tentar desserializar como resposta base
                 var baseResponse = JsonConvert.DeserializeObject<BaseResponse>(message);
 
                 if (!baseResponse.Success)
@@ -425,8 +629,13 @@ namespace BattleSystem
                     return;
                 }
 
-                // Verificar tipo específico de resposta
-                if (message.Contains("\"battleId\"") && !message.Contains("\"battle\""))
+                // Tratamento específico por tipo de mensagem
+                if (message.Contains("\"level\"") && message.Contains("\"experienceToNextLevel\""))
+                {
+                    var expResponse = JsonConvert.DeserializeObject<ExperienceUpdateResponse>(message);
+                    HandleExperienceUpdate(expResponse);
+                }
+                else if (message.Contains("\"battleId\"") && !message.Contains("\"battle\""))
                 {
                     var response = JsonConvert.DeserializeObject<CreateBattleResponse>(message);
                     HandleCreateBattleResponse(response);
@@ -467,22 +676,22 @@ namespace BattleSystem
             }
         }
 
+        #endregion
+
+        #region Handlers de Resposta
+
         private void HandleCreateTeamResponse(CreateTeamResponse response)
         {
-            LogMessage($"Equipa criada com sucesso: {response.TeamName} (ID: {response.TeamId})");
+            LogMessage($"Equipe criada com sucesso: {response.TeamName} (ID: {response.TeamId})");
             // Atualizar estado da batalha para ver a nova equipe
             GetBattleState();
         }
 
-
-
-
-
         private void HandleCreateBattleResponse(CreateBattleResponse response)
         {
             battleId = response.BattleId;
-            battleIdInputField.text = response.RoomCode; // Mostrar o código de sala em vez do ID completo
-            roomCodeText.text = $"Código da Sala: {response.RoomCode}";
+            if (battleIdInputField != null) battleIdInputField.text = response.RoomCode;
+            if (roomCodeText != null) roomCodeText.text = $"Código da Sala: {response.RoomCode}";
 
             LogMessage($"Batalha criada com código: {response.RoomCode}");
 
@@ -495,18 +704,43 @@ namespace BattleSystem
             playerId = response.PlayerId;
             teamId = response.TeamId;
 
-            playerIdText.text = $"Player ID: {playerId} | Equipa: {response.TeamName}";
-            LogMessage($"entrou na batalha (ID: {playerId})");
-            LogMessage($"Equipa: {response.TeamName}");
+            if (playerIdText != null) playerIdText.text = $"Player ID: {playerId} | Equipe: {response.TeamName}";
+            LogMessage($"Entrou na batalha (ID: {playerId})");
+            LogMessage($"Equipe: {response.TeamName}");
 
-            // Atualizar UI para mostrar informações do jogador
-            UpdatePlayerUI();
+            // Inicializar progresso da classe
+            InitializeClassProgress();
 
             // Transicionar para o estado de preparação de batalha
             ChangeState(ClientState.PreparingBattle);
 
             // Solicitar o estado atual da batalha para ver outros jogadores
             GetBattleState();
+        }
+
+        private void InitializeClassProgress()
+        {
+            if (classDropdown == null) return;
+
+            string currentClass = classDropdown.options[classDropdown.value].text;
+            if (!localClassProgress.ContainsKey(currentClass))
+            {
+                localClassProgress[currentClass] = new ClassMasteryInfo
+                {
+                    Class = currentClass,
+                    Level = 1,
+                    Experience = 0,
+                    ExperienceToNextLevel = 100,
+                    SessionDuration = TimeSpan.Zero,
+                    BattlesWon = 0,
+                    BattlesLost = 0,
+                    WinRate = 0,
+                    TotalDamageDealt = 0,
+                    TotalHealingDone = 0
+                };
+            }
+
+            UpdatePlayerProgressUI();
         }
 
         private void HandleStartBattleResponse(StartBattleResponse response)
@@ -546,19 +780,15 @@ namespace BattleSystem
                                  battle.Enemies.All(e => !e.IsAlive);
                 }
 
-                result += playersWon ? "Sua equipa venceu!" : "Sua equipa perdeu!";
+                result += playersWon ? "Sua equipe venceu!" : "Sua equipe perdeu!";
             }
 
             LogMessage(result);
-            battleResultText.text = result;
+            if (battleResultText != null) battleResultText.text = result;
 
             // Mudar para o estado de fim de batalha
             ChangeState(ClientState.BattleEnded);
         }
-
-
-
-
 
         private void HandleExecuteActionResponse(ExecuteActionResponse response)
         {
@@ -585,10 +815,6 @@ namespace BattleSystem
 
                     LogMessage(resultMsg);
                 }
-            }
-            else
-            {
-                LogMessage("A ação não produziu resultados (possivelmente uma ação de Passar Turno)");
             }
 
             // Atualizar estado da batalha após a ação para ver as mudanças
@@ -623,28 +849,63 @@ namespace BattleSystem
                 return;
             }
 
+            // Atualizar UI
             UpdateBattleStateUI();
-
-            // Atualizar dropdown de equipes
             UpdateTeamDropdown();
-
-            // Atualizar dropdown de alvos
             UpdateTargetsDropdown();
-
-            // Atualizar dropdown de habilidades se temos um jogador
-            if (!string.IsNullOrEmpty(playerId))
-            {
-                UpdateSkillsDropdown();
-            }
+            UpdateSkillsDropdown();
 
             // Se estamos em batalha, ajustar interatividade dos botões de ação
             if (currentState == ClientState.InBattle && currentBattle != null)
             {
                 bool isPlayerTurn = currentBattle.CurrentParticipant == playerId;
-                attackButton.interactable = isPlayerTurn;
-                skillButton.interactable = isPlayerTurn;
-                passButton.interactable = isPlayerTurn;
+                if (attackButton != null) attackButton.interactable = isPlayerTurn;
+                if (skillButton != null) skillButton.interactable = isPlayerTurn;
+                if (passButton != null) passButton.interactable = isPlayerTurn;
             }
+        }
+
+        private void HandleExperienceUpdate(ExperienceUpdateResponse response)
+        {
+            LogMessage($"Experiência atualizada: +{response.XpGained} XP");
+
+            // Atualizar dados de progresso local
+            string currentClass = response.Class;
+            if (!localClassProgress.ContainsKey(currentClass))
+            {
+                localClassProgress[currentClass] = new ClassMasteryInfo
+                {
+                    Class = currentClass,
+                    Level = response.Level,
+                    Experience = response.Experience,
+                    ExperienceToNextLevel = response.ExperienceToNextLevel
+                };
+            }
+            else
+            {
+                localClassProgress[currentClass].Level = response.Level;
+                localClassProgress[currentClass].Experience = response.Experience;
+                localClassProgress[currentClass].ExperienceToNextLevel = response.ExperienceToNextLevel;
+            }
+
+            // Mostrar mensagem de level up
+            if (response.LeveledUp)
+            {
+                string newSkills = response.NewSkillsLearned.Count > 0
+                    ? $"\nNovas habilidades: {string.Join(", ", response.NewSkillsLearned)}"
+                    : "";
+
+                string statBonuses = "";
+                foreach (var bonus in response.StatBonuses)
+                {
+                    statBonuses += $"\n+{bonus.Value} {bonus.Key}";
+                }
+
+                LogMessage($"LEVEL UP! Agora você é um {currentClass} nível {response.Level}!{newSkills}{statBonuses}");
+            }
+
+            // Atualizar UI de progresso
+            UpdatePlayerProgressUI();
         }
 
         #endregion
@@ -674,60 +935,6 @@ namespace BattleSystem
             ChangeState(ClientState.InLobby);
         }
 
-
-
-
-        private bool IsAlly(string characterId)
-        {
-            if (currentBattle == null || string.IsNullOrEmpty(playerId) || string.IsNullOrEmpty(characterId))
-                return false;
-
-            // Se é o próprio jogador
-            if (characterId == playerId)
-                return true;
-
-            // Encontrar o time do jogador
-            Team playerTeam = FindPlayerTeam();
-            if (playerTeam == null)
-                return false;
-
-            // Se estamos em modo PvP
-            if (currentBattle.IsPvP)
-            {
-                // Verificar se o personagem está no mesmo time
-                foreach (var player in playerTeam.Players)
-                {
-                    if (player.Id == characterId)
-                        return true;
-                }
-
-                // Em PvP, jogadores de outros times não são aliados
-                return false;
-            }
-            else
-            {
-                // Em PvE, todos os jogadores são aliados
-                foreach (var team in currentBattle.Teams)
-                {
-                    foreach (var player in team.Players)
-                    {
-                        if (player.Id == characterId)
-                            return true;
-                    }
-                }
-
-                // Verificar se é um inimigo (em PvE, inimigos nunca são aliados)
-                foreach (var enemy in currentBattle.Enemies)
-                {
-                    if (enemy.Id == characterId)
-                        return false;
-                }
-            }
-
-            return false;
-        }
-
-
         public async void CreateTeam()
         {
             if (string.IsNullOrEmpty(battleId))
@@ -750,7 +957,7 @@ namespace BattleSystem
             await SendMessage(request);
         }
 
-        public async void RefreshTeams()
+        public void RefreshTeams()
         {
             if (string.IsNullOrEmpty(battleId))
             {
@@ -758,7 +965,7 @@ namespace BattleSystem
                 return;
             }
 
-           GetBattleState();
+            GetBattleState();
         }
 
         public async void JoinBattle()
@@ -769,79 +976,34 @@ namespace BattleSystem
                 return;
             }
 
-            // Primeiro, verificamos se o que foi digitado é um código de sala
+            // Verificar se o que foi digitado é um código de sala ou ID
             string inputCode = battleIdInputField.text.Trim();
-            LogMessage($"Tentando entrar com código: {inputCode}");
-
-            // Se o código tiver o tamanho de um código de sala (5 dígitos)
             bool isRoomCode = inputCode.Length == 5 && inputCode.All(char.IsDigit);
+
+            var stateRequest = new GetBattleStateRequest
+            {
+                RequestType = "GetBattleState"
+            };
 
             if (isRoomCode)
             {
                 LogMessage($"Usando como código de sala: {inputCode}");
-                // Solicita informações da batalha usando o código da sala
-                var stateRequest = new GetBattleStateRequest
-                {
-                    RequestType = "GetBattleState",
-                    RoomCode = inputCode
-                };
-
-                await SendMessage(stateRequest);
+                stateRequest.RoomCode = inputCode;
             }
             else
             {
                 LogMessage($"Usando como ID de batalha: {inputCode}");
-                // Usa o valor como ID da batalha diretamente
                 battleId = inputCode;
-                var stateRequest = new GetBattleStateRequest
-                {
-                    RequestType = "GetBattleState",
-                    BattleId = battleId
-                };
-
-                await SendMessage(stateRequest);
+                stateRequest.BattleId = battleId;
             }
 
-            // Não mudamos o estado aqui - ele será atualizado quando recebermos a resposta
-            LogMessage($"Verificando informações da sala...");
+            await SendMessage(stateRequest);
+            LogMessage("Verificando informações da sala...");
         }
-
-        private async Task CreateTeamAndJoin(string playerName)
-        {
-            // Primeiro cria uma equipe
-            string teamName = !string.IsNullOrEmpty(createTeamInputField.text)
-                ? createTeamInputField.text
-                : "Time " + UnityEngine.Random.Range(1, 100);
-
-            await CreateTeamWithName(teamName);
-
-            // Aguardar um pouco para garantir que a equipe foi criada
-            await Task.Delay(500);
-
-            // Obter o estado atualizado da batalha
-            GetBattleState();
-
-            // Aguardar mais um pouco para garantir que recebemos o estado
-            await Task.Delay(500);
-
-            // Agora tentar entrar em qualquer equipe (o servidor escolherá a nova equipe)
-            var request = new JoinBattleRequest
-            {
-                RequestType = "JoinBattle",
-                BattleId = battleIdInputField.text,
-                PlayerName = playerName,
-                Class = classDropdown.options[classDropdown.value].text,
-                // Deixar TeamId nulo para que o servidor escolha a última equipe criada
-                TeamId = null
-            };
-
-            await SendMessage(request);
-        }
-
 
         public async void JoinSelectedTeam()
         {
-            if (string.IsNullOrEmpty(battleId) || teamSelectionDropdown.options.Count == 0)
+            if (string.IsNullOrEmpty(battleId) || teamSelectionDropdown == null || teamSelectionDropdown.options.Count == 0)
             {
                 LogMessage("Não há equipes disponíveis ou ID da batalha não especificado");
                 return;
@@ -851,75 +1013,111 @@ namespace BattleSystem
                 ? playerNameInputField.text
                 : $"Player {UnityEngine.Random.Range(1000, 9999)}";
 
-            // Obtém a opção selecionada no dropdown
+            // Obter a opção selecionada no dropdown
             string selectedTeam = teamSelectionDropdown.options[teamSelectionDropdown.value].text;
-            LogMessage($"Opção selecionada: '{selectedTeam}'");
 
-            // Verifica se é para criar uma nova equipe
+            // Verificar se é para criar uma nova equipe
             if (selectedTeam == "+ Criar Nova Equipe")
             {
-                LogMessage("Criando nova equipe e entrando...");
                 await CreateTeamAndJoin(playerName);
                 return;
             }
 
-            // Encontra o ID da equipe correspondente à seleção
-            string selectedTeamId = null;
-
-            // Procurar a entrada exata primeiro
-            if (teamIdNameMap.ContainsKey(selectedTeam))
-            {
-                selectedTeamId = teamIdNameMap[selectedTeam];
-            }
-            else
-            {
-                // Tentar encontrar o ID da equipe nas entradas do dicionário
-                foreach (var entry in teamIdNameMap)
-                {
-                    LogMessage($"Analisando equipe: '{entry.Key}' com ID: {entry.Value}");
-
-                    // Se a entrada do dicionário contém o início do texto selecionado
-                    // (ignorando a parte com contagem de jogadores e status)
-                    if (selectedTeam.StartsWith(entry.Key.Split('(')[0].Trim()))
-                    {
-                        selectedTeamId = entry.Value;
-                        LogMessage($"Correspondência encontrada para equipe: {entry.Key} -> {entry.Value}");
-                        break;
-                    }
-                }
-            }
-
+            // Encontrar o ID da equipe correspondente à seleção
+            string selectedTeamId = FindTeamId(selectedTeam);
             if (string.IsNullOrEmpty(selectedTeamId))
             {
                 LogMessage($"Não foi possível identificar o ID da equipe para: {selectedTeam}");
-                LogMessage("IDs de equipe disponíveis:");
-                foreach (var entry in teamIdNameMap)
-                {
-                    LogMessage($"- '{entry.Key}': {entry.Value}");
-                }
                 return;
             }
 
-            // Verifica se o jogador já está nesta equipe
+            // Verificar se o jogador já está nesta equipe
             if (teamId == selectedTeamId && !string.IsNullOrEmpty(playerId))
             {
                 LogMessage($"Você já está na equipe com ID: {selectedTeamId}");
                 return;
             }
 
-            LogMessage($"Entrando na equipe com ID: {selectedTeamId}");
+            // Enviar requisição para entrar na equipe
+            await JoinTeam(playerName, selectedTeamId);
+        }
 
-            // Prepara a requisição para entrar na equipe
+        private string FindTeamId(string selectedTeam)
+        {
+            // Procurar a entrada exata primeiro
+            if (teamIdNameMap.ContainsKey(selectedTeam))
+                return teamIdNameMap[selectedTeam];
+
+            // Tentar encontrar o ID da equipe nas entradas do dicionário
+            foreach (var entry in teamIdNameMap)
+            {
+                // Se a entrada do dicionário contém o início do texto selecionado
+                if (selectedTeam.StartsWith(entry.Key.Split('(')[0].Trim()))
+                    return entry.Value;
+            }
+
+            return null;
+        }
+
+        private async Task CreateTeamAndJoin(string playerName)
+        {
+            // Criar uma equipe
+            string teamName = !string.IsNullOrEmpty(createTeamInputField.text)
+                ? createTeamInputField.text
+                : "Time " + UnityEngine.Random.Range(1, 100);
+
+            await CreateTeamWithName(teamName);
+
+            // Aguardar um pouco para garantir que a equipe foi criada
+            await Task.Delay(500);
+            GetBattleState();
+            await Task.Delay(500);
+
+            // Entrar na equipe recém-criada (o servidor escolherá a última equipe criada)
+            await JoinTeam(playerName, null);
+        }
+
+        private async Task CreateTeamWithName(string teamName)
+        {
+            if (string.IsNullOrEmpty(battleId))
+            {
+                LogMessage("ID da batalha não especificado");
+                return;
+            }
+
+            var request = new CreateTeamRequest
+            {
+                RequestType = "CreateTeam",
+                BattleId = battleId,
+                TeamName = teamName
+            };
+
+            await SendMessage(request);
+        }
+
+        private async Task JoinTeam(string playerName, string teamId)
+        {
+            if (string.IsNullOrEmpty(battleId))
+            {
+                LogMessage("ID da batalha não especificado");
+                return;
+            }
+
+            if (classDropdown == null)
+            {
+                LogMessage("Dropdown de classes não encontrado");
+                return;
+            }
+
             var request = new JoinBattleRequest
             {
                 RequestType = "JoinBattle",
                 BattleId = battleId,
                 PlayerName = playerName,
                 Class = classDropdown.options[classDropdown.value].text,
-                TeamId = selectedTeamId
+                TeamId = teamId
             };
 
-            // Envia a requisição
             await SendMessage(request);
         }
 
@@ -945,29 +1143,13 @@ namespace BattleSystem
             await SendMessage(request);
         }
 
-        private async Task CreateTeamWithName(string teamName)
-        {
-            if (string.IsNullOrEmpty(battleId))
-            {
-                LogMessage("ID da batalha não especificado");
-                return;
-            }
-
-            var request = new CreateTeamRequest
-            {
-                RequestType = "CreateTeam",
-                BattleId = battleId,
-                TeamName = teamName
-            };
-
-            await SendMessage(request);
-        }
-
-
         public void AddEnemyToList()
         {
+            if (enemySelectionDropdown == null)
+                return;
+
             string enemyId = enemySelectionDropdown.options[enemySelectionDropdown.value].text;
-            
+
             if (!selectedEnemyIds.Contains(enemyId))
             {
                 selectedEnemyIds.Add(enemyId);
@@ -1011,19 +1193,19 @@ namespace BattleSystem
             await SendMessage(request);
         }
 
-        public async void ExecuteAttack()
+        public void ExecuteAttack()
         {
-            await ExecuteAction(ActionType.Attack);
+            ExecuteAction(ActionType.Attack).ConfigureAwait(false);
         }
 
-        public async void ExecuteSkill()
+        public void ExecuteSkill()
         {
-            await ExecuteAction(ActionType.Skill);
+            ExecuteAction(ActionType.Skill).ConfigureAwait(false);
         }
 
-        public async void ExecutePass()
+        public void ExecutePass()
         {
-            await ExecuteAction(ActionType.Pass);
+            ExecuteAction(ActionType.Pass).ConfigureAwait(false);
         }
 
         private async Task ExecuteAction(ActionType actionType)
@@ -1041,43 +1223,11 @@ namespace BattleSystem
                 return;
             }
 
-            string targetId = null;
-            if (actionType != ActionType.Pass && targetSelectionDropdown.options.Count > 0)
-            {
-                // Obter o nome de exibição selecionado
-                string selectedDisplayName = targetSelectionDropdown.options[targetSelectionDropdown.value].text;
+            // Obter alvo e habilidade selecionados
+            string targetId = GetSelectedTargetId(actionType);
+            string skillId = GetSelectedSkillId(actionType);
 
-                // Obter o ID real do alvo usando o mapeamento
-                if (targetIdMap.ContainsKey(selectedDisplayName))
-                {
-                    targetId = targetIdMap[selectedDisplayName];
-                }
-            }
-
-            string skillId = null;
-            if (actionType == ActionType.Skill && skillSelectionDropdown.options.Count > 0)
-            {
-                // Obter o nome de exibição selecionado da habilidade
-                string selectedSkillDisplay = skillSelectionDropdown.options[skillSelectionDropdown.value].text;
-
-                // Obter o ID real da habilidade usando o mapeamento
-                if (skillIdMap.ContainsKey(selectedSkillDisplay))
-                {
-                    skillId = skillIdMap[selectedSkillDisplay];
-                    LogMessage($"Usando habilidade: {selectedSkillDisplay} -> ID: {skillId}");
-                }
-                else
-                {
-                    LogMessage($"Erro: ID da habilidade não encontrado para: {selectedSkillDisplay}");
-                    LogMessage("Habilidades disponíveis:");
-                    foreach (var entry in skillIdMap)
-                    {
-                        LogMessage($"- '{entry.Key}': {entry.Value}");
-                    }
-                    return;
-                }
-            }
-
+            // Criar a ação
             var action = new Action
             {
                 Type = actionType,
@@ -1087,6 +1237,7 @@ namespace BattleSystem
 
             LogMessage($"Executando ação: {actionType}, Alvo: {targetId}, Habilidade: {skillId}");
 
+            // Enviar a requisição
             var request = new ExecuteActionRequest
             {
                 RequestType = "ExecuteAction",
@@ -1098,36 +1249,57 @@ namespace BattleSystem
             await SendMessage(request);
         }
 
+        private string GetSelectedTargetId(ActionType actionType)
+        {
+            if (actionType == ActionType.Pass || targetSelectionDropdown == null || targetSelectionDropdown.options.Count == 0)
+                return null;
+
+            string selectedDisplayName = targetSelectionDropdown.options[targetSelectionDropdown.value].text;
+            return targetIdMap.TryGetValue(selectedDisplayName, out string targetId) ? targetId : null;
+        }
+
+        private string GetSelectedSkillId(ActionType actionType)
+        {
+            if (actionType != ActionType.Skill || skillSelectionDropdown == null || skillSelectionDropdown.options.Count == 0)
+                return null;
+
+            string selectedSkillDisplay = skillSelectionDropdown.options[skillSelectionDropdown.value].text;
+
+            if (skillIdMap.TryGetValue(selectedSkillDisplay, out string skillId))
+            {
+                return skillId;
+            }
+            else
+            {
+                LogMessage($"Erro: ID da habilidade não encontrado para: {selectedSkillDisplay}");
+                return null;
+            }
+        }
+
+        public void ShowPlayerProgress()
+        {
+            if (playerProgressText != null)
+            {
+                LogMessage("Mostrando progresso do jogador");
+                UpdatePlayerProgressUI();
+            }
+        }
+
         #endregion
 
         #region Atualização da UI
 
         private void UpdateConnectionStatus(string status)
         {
-            connectionStatusText.text = $"Status: {status}";
-        }
-
-        private void SetButtonsInteractable(bool interactable)
-        {
-            connectButton.interactable = !interactable;
-            disconnectButton.interactable = interactable;
-            createBattleButton.interactable = interactable;
-            joinBattleButton.interactable = interactable;
-            startBattleButton.interactable = interactable;
-            addEnemyButton.interactable = interactable;
-            attackButton.interactable = interactable;
-            skillButton.interactable = interactable;
-            passButton.interactable = interactable;
-            refreshStateButton.interactable = interactable;
-        }
-
-        private void UpdatePlayerUI()
-        {
-            playerIdText.text = $"Player ID: {playerId}";
+            if (connectionStatusText != null)
+                connectionStatusText.text = $"Status: {status}";
         }
 
         private void UpdateSelectedEnemiesUI()
         {
+            if (selectedEnemiesText == null)
+                return;
+
             selectedEnemiesText.text = "Inimigos selecionados:\n";
             foreach (var enemyId in selectedEnemyIds)
             {
@@ -1135,160 +1307,136 @@ namespace BattleSystem
             }
         }
 
-
         private void UpdateBattleStateUI()
         {
             if (currentBattle == null)
             {
-                battleStateText.text = "N/A";
-                currentTurnText.text = "N/A";
+                if (battleStateText != null) battleStateText.text = "N/A";
+                if (currentTurnText != null) currentTurnText.text = "N/A";
                 return;
             }
 
-            // Exibir o código da sala se disponível
-            if (!string.IsNullOrEmpty(currentBattle.RoomCode))
+            if (!string.IsNullOrEmpty(currentBattle.RoomCode) && roomCodeText != null)
             {
                 roomCodeText.text = $"Código da Sala: {currentBattle.RoomCode}";
             }
 
-            // Identificar o time do jogador
             Team playerTeam = FindPlayerTeam();
-            string playerTeamId = playerTeam?.Id;
 
-            battleStateText.text = $"Estado: {currentBattle.State}";
-            currentTurnText.text = $"Turno: {currentBattle.CurrentTurn} | Jogador: {currentBattle.CurrentParticipant}";
+            if (battleStateText != null)
+                battleStateText.text = $"Estado: {currentBattle.State}";
 
-            string teams = "";
+            if (currentTurnText != null)
+                currentTurnText.text = $"Turno: {currentBattle.CurrentTurn} | Jogador: {currentBattle.CurrentParticipant}";
 
-            // Em PvP, separar claramente seu time dos times adversários
+            if (battleStateText != null)
+            {
+                string teamsText = FormatTeamsText(playerTeam);
+                string enemiesText = FormatEnemiesText();
+                battleStateText.text = $"{battleStateText.text}\n\n{teamsText}{enemiesText}";
+            }
+        }
+
+        private string FormatTeamsText(Team playerTeam)
+        {
+            string result = "";
+
             if (currentBattle.IsPvP && playerTeam != null)
             {
-                // Primeiro mostrar seu time
-                teams += "<color=green><b>SEU TIME</b></color>\n";
-                teams += $"Equipe {playerTeam.Name}:\n";
+                // Modo PvP - mostrar seu time e times inimigos
+                result += "<color=green><b>SEU TIME</b></color>\n";
+                result += FormatTeamPlayers(playerTeam);
+                result += "\n<color=red><b>TIMES INIMIGOS</b></color>\n";
 
-                foreach (var player in playerTeam.Players)
-                {
-                    string youMarker = (player.Id == playerId) ? " [VOCÊ]" : "";
-                    string turnMarker = (player.Id == currentBattle.CurrentParticipant) ? " <<< TURNO ATUAL" : "";
-                    teams += $"- {player.Name} ({player.Class}): HP {player.Health}/{player.MaxHealth}, MP {player.Mana}/{player.MaxMana}{turnMarker}{youMarker}\n";
-                }
-
-                teams += "\n<color=red><b>TIMES INIMIGOS</b></color>\n";
-
-                // Depois mostrar os times adversários
                 foreach (var team in currentBattle.Teams)
                 {
-                    if (team.Id == playerTeam.Id) continue; // Pular seu próprio time
-
-                    teams += $"Equipe {team.Name}:\n";
-                    foreach (var player in team.Players)
-                    {
-                        string turnMarker = (player.Id == currentBattle.CurrentParticipant) ? " <<< TURNO ATUAL" : "";
-                        teams += $"- {player.Name} ({player.Class}): HP {player.Health}/{player.MaxHealth}, MP {player.Mana}/{player.MaxMana}{turnMarker}\n";
-                    }
+                    if (team.Id == playerTeam.Id) continue;
+                    result += FormatTeamPlayers(team);
                 }
             }
             else
             {
-                // No modo PvE ou se não conseguir identificar o time, mostrar tudo normalmente
+                // Modo PvE ou sem time - mostrar todos os times
                 foreach (var team in currentBattle.Teams)
                 {
-                    bool isPlayerTeam = (team.Id == playerTeamId);
-                    string teamHeader = isPlayerTeam ? "<color=green>Equipe " : "Equipe ";
-                    teamHeader += team.Name;
-                    teamHeader += isPlayerTeam ? "</color>:" : ":";
-                    teams += $"{teamHeader}\n";
+                    bool isPlayerTeam = team.Id == playerTeam?.Id;
+                    string teamHeader = isPlayerTeam ?
+                        $"<color=green>{team.Name} (SEU TIME)</color>" : team.Name;
+                    result += $"Equipe {teamHeader}:\n";
 
                     foreach (var player in team.Players)
                     {
-                        string youMarker = (player.Id == playerId) ? " [VOCÊ]" : "";
-                        string turnMarker = (player.Id == currentBattle.CurrentParticipant) ? " <<< TURNO ATUAL" : "";
-                        teams += $"- {player.Name} ({player.Class}): HP {player.Health}/{player.MaxHealth}, MP {player.Mana}/{player.MaxMana}{turnMarker}{youMarker}\n";
+                        string status = player.IsAlive ? "Vivo" : "Morto";
+                        result += $"  - {player.Name} ({player.Class}) - Nível {player.Level} - {player.Health}/{player.MaxHealth} HP - {status}\n";
                     }
+                    result += "\n";
                 }
             }
 
-            // Mostrar inimigos (apenas em modo PvE)
-            string enemies = "";
-            if (!currentBattle.IsPvP && currentBattle.Enemies.Count > 0)
-            {
-                enemies = "\n<color=red>Inimigos:</color>\n";
-                foreach (var enemy in currentBattle.Enemies)
-                {
-                    string turnMarker = enemy.Id == currentBattle.CurrentParticipant ? " <<< TURNO ATUAL" : "";
-                    enemies += $"- {enemy.Name}: HP {enemy.Health}/{enemy.MaxHealth}{turnMarker}\n";
-                }
-            }
-
-            battleStateText.text = $"{battleStateText.text}\n\n{teams}{enemies}";
+            return result;
         }
 
+        private string FormatTeamPlayers(Team team)
+        {
+            string result = $"Equipe {team.Name}:\n";
+            foreach (var player in team.Players)
+            {
+                string status = player.IsAlive ? "Vivo" : "Morto";
+                result += $"  - {player.Name} ({player.Class}) - Nível {player.Level} - {player.Health}/{player.MaxHealth} HP - {status}\n";
+            }
+            result += "\n";
+            return result;
+        }
+
+        private string FormatEnemiesText()
+        {
+            if (currentBattle.IsPvP || currentBattle.Enemies.Count == 0)
+                return "";
+
+            string result = "\n<color=red>Inimigos:</color>\n";
+            foreach (var enemy in currentBattle.Enemies)
+            {
+                string status = enemy.IsAlive ? "Vivo" : "Morto";
+                result += $"  - {enemy.Name} - {enemy.Health}/{enemy.MaxHealth} HP - {status}\n";
+            }
+            return result;
+        }
 
         private void UpdateTeamDropdown()
         {
-            if (currentBattle == null) return;
+            if (currentBattle == null || teamSelectionDropdown == null)
+                return;
 
             teamSelectionDropdown.ClearOptions();
             teamIdNameMap.Clear();
 
             List<string> teamOptions = new List<string>();
+            Team currentPlayerTeam = FindPlayerTeam();
 
-            // Verificar se o jogador já está em alguma equipe
-            bool playerHasTeam = !string.IsNullOrEmpty(teamId);
-            Team currentPlayerTeam = null;
-
-            // Procurar a equipe atual do jogador
-            if (playerHasTeam)
-            {
-                foreach (var team in currentBattle.Teams)
-                {
-                    if (team.Players.Any(p => p.Id == playerId))
-                    {
-                        currentPlayerTeam = team;
-                        break;
-                    }
-                }
-            }
-
-            // Adicionar todas as equipes ao dropdown
+            // Adicionar equipes existentes
             foreach (var team in currentBattle.Teams)
             {
-                // Verificar status de prontidão
-                string readyStatus = currentBattle.TeamReadyStatus.TryGetValue(team.Id, out bool isReady) && isReady
-                    ? " [PRONTO]"
-                    : " [NÃO PRONTO]";
+                string readyStatus = currentBattle.TeamReadyStatus.TryGetValue(team.Id, out bool isReady)
+                    ? (isReady ? "✓" : "✗")
+                    : "✗";
 
-                // Marcar equipe do jogador
-                string currentTeamMarker = (team == currentPlayerTeam) ? " ✓" : "";
-
-                // Gerar texto de exibição com informações da equipe
-                string displayText = $"{team.Name} ({team.Players.Count}/4 jogadores){currentTeamMarker}{readyStatus}";
-
-                // Adicionar à lista de opções
-                teamOptions.Add(displayText);
-
-                // Importante: mapear diretamente o texto de exibição para o ID da equipe
-                teamIdNameMap[displayText] = team.Id;
-
-                // Log para debug
-                LogMessage($"Mapeando equipe: '{displayText}' -> ID: {team.Id}");
+                string displayName = $"{team.Name} ({team.Players.Count}/4) {readyStatus}";
+                teamOptions.Add(displayName);
+                teamIdNameMap[displayName] = team.Id;
             }
 
-            // Adicionar opção "Criar Nova Equipe"
-            if (currentBattle.Teams.Count < 4) // Limite de 4 equipes
+            // Adicionar opção de criar nova equipe se houver espaço
+            if (currentBattle.Teams.Count < 4)
             {
                 teamOptions.Add("+ Criar Nova Equipe");
             }
 
-            // Adicionar as opções ao dropdown depois de construir a lista completa
             teamSelectionDropdown.ClearOptions();
             teamSelectionDropdown.AddOptions(teamOptions);
 
-            // Atualizar UI de status de prontidão para a equipe atual
-            if (playerHasTeam && currentPlayerTeam != null)
+            // Atualizar estado de prontidão
+            if (currentPlayerTeam != null && !string.IsNullOrEmpty(teamId))
             {
-                // Atualizar o status de prontidão local baseado no status da equipe
                 if (currentBattle.TeamReadyStatus.TryGetValue(currentPlayerTeam.Id, out bool teamReady))
                 {
                     isTeamReady = teamReady;
@@ -1299,93 +1447,148 @@ namespace BattleSystem
 
         private void UpdateTargetsDropdown()
         {
-            if (currentBattle == null) return;
+            if (currentBattle == null || targetSelectionDropdown == null)
+                return;
 
             targetSelectionDropdown.ClearOptions();
+            targetIdMap.Clear();
 
-            // Usaremos um dicionário para mapear os nomes exibidos aos IDs reais
-            Dictionary<string, string> targetMap = new Dictionary<string, string>();
             List<string> targetDisplayNames = new List<string>();
-
-            // Encontrar o time do jogador atual
             Team playerTeam = FindPlayerTeam();
 
-            // Verificar se estamos em uma batalha PvP ou PvE
             if (currentBattle.IsPvP)
             {
-                // Log para depuração
-                LogMessage($"Modo PvP: Montando alvos. Seu ID: {playerId}, Time: {playerTeam?.Name ?? "Desconhecido"}");
-
-                if (playerTeam != null)
-                {
-                    // Adicionar jogadores de times opositores como possíveis alvos de ataque
-                    foreach (var team in currentBattle.Teams)
-                    {
-                        bool isEnemyTeam = team.Id != playerTeam.Id;
-                        string teamRelation = isEnemyTeam ? "INIMIGO" : "ALIADO";
-
-                        LogMessage($"Analisando time: {team.Name} (ID: {team.Id}) - {teamRelation}");
-
-                        foreach (var player in team.Players)
-                        {
-                            if (!player.IsAlive) continue;
-
-                            if (isEnemyTeam)
-                            {
-                                // Jogador de time adversário - alvo válido para ataque
-                                string displayName = $"{player.Name} [{team.Name}] (Inimigo)";
-                                targetMap[displayName] = player.Id;
-                                targetDisplayNames.Add(displayName);
-                                LogMessage($"Adicionando inimigo: {player.Name} (ID: {player.Id})");
-                            }
-                            else if (player.Id != playerId) // Mesmo time, mas não é o próprio jogador
-                            {
-                                // Aliado - alvo válido para skills de cura/suporte
-                                string displayName = $"{player.Name} (Aliado)";
-                                targetMap[displayName] = player.Id;
-                                targetDisplayNames.Add(displayName);
-                                LogMessage($"Adicionando aliado: {player.Name} (ID: {player.Id})");
-                            }
-                        }
-                    }
-                }
+                AddPvPTargets(playerTeam, targetDisplayNames);
             }
-            else // Modo PvE
+            else
             {
-                // Adicionar outros jogadores da equipe como possíveis alvos (para cura/buffs)
-                foreach (var team in currentBattle.Teams)
-                {
-                    foreach (var player in team.Players)
-                    {
-                        if (player.IsAlive && player.Id != playerId)
-                        {
-                            string displayName = $"{player.Name} (Aliado)";
-                            targetMap[displayName] = player.Id;
-                            targetDisplayNames.Add(displayName);
-                        }
-                    }
-                }
-
-                // Adicionar inimigos como alvos
-                foreach (var enemy in currentBattle.Enemies)
-                {
-                    if (enemy.IsAlive)
-                    {
-                        string displayName = $"{enemy.Name} (Inimigo)";
-                        targetMap[displayName] = enemy.Id;
-                        targetDisplayNames.Add(displayName);
-                    }
-                }
+                AddPvETargets(targetDisplayNames);
             }
 
-            // Adicionar os nomes formatados ao dropdown
             targetSelectionDropdown.AddOptions(targetDisplayNames);
-
-            // Armazenar o mapeamento
-            this.targetIdMap = targetMap;
         }
 
-        // Adicione este método auxiliar para encontrar o time do jogador atual
+        private void AddPvPTargets(Team playerTeam, List<string> targetDisplayNames)
+        {
+            if (playerTeam == null) return;
+
+            foreach (var team in currentBattle.Teams)
+            {
+                if (team.Id == playerTeam.Id) continue;
+
+                foreach (var player in team.Players)
+                {
+                    if (player.IsAlive)
+                    {
+                        string displayName = $"{player.Name} ({player.Class}) - {player.Health}/{player.MaxHealth} HP [Inimigo]";
+                        targetDisplayNames.Add(displayName);
+                        targetIdMap[displayName] = player.Id;
+                    }
+                }
+            }
+        }
+
+        private void AddPvETargets(List<string> targetDisplayNames)
+        {
+            // Adicionar jogadores (aliados e outros)
+            foreach (var team in currentBattle.Teams)
+            {
+                foreach (var player in team.Players)
+                {
+                    if (player.IsAlive)
+                    {
+                        bool isAlly = IsAlly(player.Id);
+                        string allyStatus = isAlly ? "[Aliado]" : "[Neutro]";
+                        string displayName = $"{player.Name} ({player.Class}) - {player.Health}/{player.MaxHealth} HP {allyStatus}";
+                        targetDisplayNames.Add(displayName);
+                        targetIdMap[displayName] = player.Id;
+                    }
+                }
+            }
+
+            // Adicionar inimigos
+            foreach (var enemy in currentBattle.Enemies)
+            {
+                if (enemy.IsAlive)
+                {
+                    string displayName = $"{enemy.Name} - {enemy.Health}/{enemy.MaxHealth} HP [Inimigo]";
+                    targetDisplayNames.Add(displayName);
+                    targetIdMap[displayName] = enemy.Id;
+                }
+            }
+        }
+
+        private void UpdateSkillsDropdown()
+        {
+            if (currentBattle == null || skillSelectionDropdown == null)
+                return;
+
+            skillSelectionDropdown.ClearOptions();
+            skillIdMap.Clear();
+            List<string> skillDisplayNames = new List<string>();
+
+            Player currentPlayer = GetCurrentPlayer();
+            if (currentPlayer != null && currentPlayer.Skills != null)
+            {
+                foreach (var skill in currentPlayer.Skills)
+                {
+                    string cooldownInfo = skill.CurrentCooldown > 0 ? $" (CD: {skill.CurrentCooldown})" : "";
+                    string manaInfo = skill.ManaCost > 0 ? $" - {skill.ManaCost} MP" : "";
+                    bool canUse = skill.CurrentCooldown == 0 && currentPlayer.Mana >= skill.ManaCost;
+                    string usabilityInfo = canUse ? "" : " [Indisponível]";
+
+                    string displayName = $"{skill.Name}{manaInfo}{cooldownInfo}{usabilityInfo}";
+                    skillDisplayNames.Add(displayName);
+                    skillIdMap[displayName] = skill.Id;
+                }
+            }
+
+            skillSelectionDropdown.AddOptions(skillDisplayNames);
+        }
+
+        private void UpdatePlayerProgressUI()
+        {
+            if (playerProgressText == null || classDropdown == null)
+                return;
+
+            string currentClass = classDropdown.options[classDropdown.value].text;
+
+            if (localClassProgress.TryGetValue(currentClass, out var progress))
+            {
+                playerProgressText.text = $"Classe: {progress.Class}\n" +
+                                         $"Nível: {progress.Level}\n" +
+                                         $"Experiência: {progress.Experience}/{progress.ExperienceToNextLevel}\n" +
+                                         $"Vitórias: {progress.BattlesWon}\n" +
+                                         $"Derrotas: {progress.BattlesLost}";
+            }
+            else
+            {
+                playerProgressText.text = "Sem progresso para esta classe";
+            }
+        }
+
+        private void UpdateReadyStatusUI()
+        {
+            if (readyStatusText != null)
+            {
+                readyStatusText.text = isTeamReady ? "Status: Pronto ✓" : "Status: Não Pronto ✗";
+                readyStatusText.color = isTeamReady ? Color.green : Color.red;
+            }
+
+            if (toggleReadyButton != null)
+            {
+                var buttonText = toggleReadyButton.GetComponentInChildren<TextMeshProUGUI>();
+                if (buttonText != null)
+                {
+                    buttonText.text = isTeamReady ? "Cancelar Pronto" : "Marcar como Pronto";
+                }
+            }
+        }
+
+        #endregion
+
+        #region Métodos Auxiliares
+
         private Team FindPlayerTeam()
         {
             if (string.IsNullOrEmpty(playerId) || currentBattle == null)
@@ -1402,98 +1605,85 @@ namespace BattleSystem
             return null;
         }
 
-        // Adicione esta variável à classe
-        private Dictionary<string, string> targetIdMap = new Dictionary<string, string>();
-
-
-        private void UpdateReadyStatusUI()
+        private Player GetCurrentPlayer()
         {
-            if (isTeamReady)
-            {
-                readyStatusText.text = "Status: Pronto ✓";
-                readyStatusText.color = Color.green;
-                toggleReadyButton.GetComponentInChildren<TextMeshProUGUI>().text = "Cancelar Prontidão";
-            }
-            else
-            {
-                readyStatusText.text = "Status: Não Pronto ✗";
-                readyStatusText.color = Color.red;
-                toggleReadyButton.GetComponentInChildren<TextMeshProUGUI>().text = "Marcar como Pronto";
-            }
-        }
-        private void UpdateSkillsDropdown()
-        {
-            if (currentBattle == null) return;
+            if (string.IsNullOrEmpty(playerId) || currentBattle == null)
+                return null;
 
-            skillSelectionDropdown.ClearOptions();
-            List<string> skillDisplayNames = new List<string>();
-            Dictionary<string, string> skillMap = new Dictionary<string, string>();
-
-            // Buscar jogador atual
-            Player currentPlayer = null;
             foreach (var team in currentBattle.Teams)
             {
-                foreach (var player in team.Players)
-                {
-                    if (player.Id == playerId)
-                    {
-                        currentPlayer = player;
-                        break;
-                    }
-                }
-                if (currentPlayer != null) break;
+                var player = team.Players.FirstOrDefault(p => p.Id == playerId);
+                if (player != null)
+                    return player;
             }
 
-            if (currentPlayer != null && currentPlayer.Skills != null)
+            return null;
+        }
+
+        private bool IsAlly(string characterId)
+        {
+            if (currentBattle == null || string.IsNullOrEmpty(playerId) || string.IsNullOrEmpty(characterId))
+                return false;
+
+            // Se é o próprio jogador
+            if (characterId == playerId)
+                return true;
+
+            // Encontrar o time do jogador
+            Team playerTeam = FindPlayerTeam();
+            if (playerTeam == null)
+                return false;
+
+            // Se estamos em modo PvP
+            if (currentBattle.IsPvP)
             {
-                LogMessage($"Atualizando habilidades para jogador {currentPlayer.Name} (ID: {currentPlayer.Id}), Mana: {currentPlayer.Mana}/{currentPlayer.MaxMana}");
-
-                foreach (var skill in currentPlayer.Skills)
-                {
-                    string displayName = $"{skill.Name} (Mana: {skill.ManaCost})";
-                    skillMap[displayName] = skill.Id;
-                    skillDisplayNames.Add(displayName);
-
-                    LogMessage($"Habilidade registrada: {skill.Name} (ID: {skill.Id}, Dano: {skill.Damage}, Cura: {skill.Healing}, Mana: {skill.ManaCost})");
-                }
+                // Verificar se o personagem está no mesmo time
+                return playerTeam.Players.Any(p => p.Id == characterId);
             }
             else
             {
-                LogMessage("Nenhuma habilidade encontrada para o jogador atual");
+                // Em PvE, todos os jogadores são aliados
+                foreach (var team in currentBattle.Teams)
+                {
+                    if (team.Players.Any(p => p.Id == characterId))
+                        return true;
+                }
+
+                // Inimigos nunca são aliados
+                return false;
             }
-
-            skillSelectionDropdown.AddOptions(skillDisplayNames);
-            this.skillIdMap = skillMap;
         }
-
-
-
-        // Adicione esta variável à classe
-        private Dictionary<string, string> skillIdMap = new Dictionary<string, string>();
 
         private void LogMessage(string message)
         {
             Debug.Log($"[BattleTestClient] {message}");
 
-            // Adicionar à UI com timestamp
-            string timestamp = DateTime.Now.ToString("HH:mm:ss");
-            logText.text = $"[{timestamp}] {message}\n" + logText.text;
-            
-            // Limitar o tamanho do log para evitar problemas de performance
-            if (logText.text.Length > 5000)
+            if (logText != null)
             {
-                logText.text = logText.text.Substring(0, 5000);
+                // Adicionar à UI com timestamp
+                string timestamp = DateTime.Now.ToString("HH:mm:ss");
+                logText.text = $"[{timestamp}] {message}\n" + logText.text;
+
+                // Limitar o tamanho do log para evitar problemas de performance
+                if (logText.text.Length > 5000)
+                {
+                    logText.text = logText.text.Substring(0, 5000);
+                }
             }
         }
 
-
-
-
         #endregion
 
-        private void OnDestroy()
+        #region Métodos Públicos
+
+        public bool IsConnected => isConnected;
+
+        public void SetConnectionParameters(string ip, int port)
         {
-            Disconnect();
+            serverIp = ip;
+            serverPort = port;
         }
+
+        #endregion
     }
 }
