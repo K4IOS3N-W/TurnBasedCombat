@@ -12,6 +12,9 @@ namespace BattleSystem
 
         [JsonProperty("message")]
         public string Message { get; set; }
+
+        [JsonProperty("responseType")]
+        public string ResponseType { get; set; }
     }
 
     [Serializable]
