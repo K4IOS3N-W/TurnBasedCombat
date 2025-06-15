@@ -564,7 +564,17 @@ namespace BattleSystem.Server
             }
 
             // Adicionar jogador à equipe
-            team.Players.Add(player);
+            try
+            {
+                team.AddPlayer(player);
+                LogMessage($"Jogador {player.Id} ({player.Name}) adicionado à equipe {team.Name} com buffs aplicados");
+            }
+            catch (InvalidOperationException ex)
+            {
+                LogMessage($"Erro ao adicionar jogador à equipe: {ex.Message}");
+                await SendErrorResponse(client, ex.Message);
+                return;
+            }
 
             // Adicionar cliente à lista de clientes da batalha
             if (!battleClients[battle.Id].Contains(client.Id))
@@ -976,150 +986,91 @@ namespace BattleSystem.Server
                 return; // Mana insuficiente
             }
 
+            // Consumir mana
             caster.Mana -= skill.ManaCost;
+            
+            // Marcar que a habilidade foi utilizada (cooldown)
+            skill.Use();
+            
+            // Registrar a ação no histórico da batalha
+            battle.ActionHistory.Add(new BattleAction
+            {
+                ActorId = caster.Id,
+                Turn = battle.CurrentTurn,
+                Timestamp = DateTime.Now,
+                ActionType = ActionType.Skill,
+                TargetId = action.TargetId,
+                SkillId = action.SkillId
+            });
 
             // Se a habilidade afeta a equipe inteira
-            if (skill.AffectsTeam)
+            if (skill.AffectsTeam || skill.TargetType == TargetType.AllEnemies || skill.TargetType == TargetType.AllAllies)
             {
-                List<object> targets = new List<object>();
+                List<Character> targets = new List<Character>();
 
-                // Determinar se alvo é uma equipe ou inimigos
-                var targetTeam = battle.Teams.FirstOrDefault(t => t.Id == action.TargetId);
-                if (targetTeam != null)
+                // Determinar alvos baseado no tipo de alvo da habilidade
+                switch (skill.TargetType)
                 {
-                    foreach (var player in targetTeam.Players)
-                    {
-                        targets.Add(player);
-                    }
-                }
-                else
-                {
-                    // Assumir que são todos os inimigos
-                    foreach (var enemy in battle.Enemies)
-                    {
-                        targets.Add(enemy);
-                    }
+                    case TargetType.AllAllies:
+                        var casterTeam = battle.Teams.FirstOrDefault(t => t.Players.Any(p => p.Id == caster.Id));
+                        if (casterTeam != null)
+                        {
+                            targets.AddRange(casterTeam.Players.Where(p => p.IsAlive));
+                        }
+                        break;
+                        
+                    case TargetType.AllEnemies:
+                        if (battle.IsPvP)
+                        {
+                            var playerTeam = battle.Teams.FirstOrDefault(t => t.Players.Any(p => p.Id == caster.Id));
+                            if (playerTeam != null)
+                            {
+                                foreach (var team in battle.Teams.Where(t => t.Id != playerTeam.Id))
+                                {
+                                    targets.AddRange(team.Players.Where(p => p.IsAlive));
+                                }
+                            }
+                        }
+                        else
+                        {
+                            targets.AddRange(battle.Enemies.Where(e => e.IsAlive));
+                        }
+                        break;
+                        
+                    default:
+                        // Para skill.AffectsTeam quando TargetType é Single, Area, etc.
+                        // Tenta encontrar um time como alvo primeiro
+                        var targetTeam = battle.Teams.FirstOrDefault(t => t.Id == action.TargetId);
+                        if (targetTeam != null)
+                        {
+                            targets.AddRange(targetTeam.Players.Where(p => p.IsAlive));
+                        }
+                        else
+                        {
+                            // Assume que são todos os inimigos
+                            targets.AddRange(battle.Enemies.Where(e => e.IsAlive));
+                        }
+                        break;
                 }
 
+                // Aplicar efeitos da habilidade a todos os alvos
                 foreach (var target in targets)
                 {
-                    if (skill.Damage > 0)
-                    {
-                        int damage = 0;
-                        if (target is Player playerTarget)
-                        {
-                            damage = CalculateSkillDamage(caster, skill, playerTarget);
-                            playerTarget.Health = Math.Max(0, playerTarget.Health - damage);
-
-                            var resultP = new ActionResult
-                            {
-                                TargetId = playerTarget.Id,
-                                DamageReceived = damage,
-                                HealingReceived = 0,
-                                IsDead = !playerTarget.IsAlive
-                            };
-
-                            results.Add(resultP);
-                        }
-                        else if (target is Enemy enemyTarget)
-                        {
-                            damage = CalculateSkillDamage(caster, skill, enemyTarget);
-                            enemyTarget.Health = Math.Max(0, enemyTarget.Health - damage);
-
-                            var resultE = new ActionResult
-                            {
-                                TargetId = enemyTarget.Id,
-                                DamageReceived = damage,
-                                HealingReceived = 0,
-                                IsDead = !enemyTarget.IsAlive
-                            };
-
-                            results.Add(resultE);
-                        }
-                    }
-
-                    if (skill.Healing > 0)
-                    {
-                        // Só aplicar cura em aliados
-                        if (target is Player playerTarget && IsAlly(caster, playerTarget, battle))
-                        {
-                            int healing = skill.Healing;
-                            playerTarget.Health = Math.Min(playerTarget.MaxHealth, playerTarget.Health + healing);
-
-                            var result = new ActionResult
-                            {
-                                TargetId = playerTarget.Id,
-                                DamageReceived = 0,
-                                HealingReceived = healing,
-                                IsDead = false
-                            };
-
-                            results.Add(result);
-                        }
-                    }
+                    var targetResults = skill.ApplyEffects(caster, target, battle);
+                    results.AddRange(targetResults);
                 }
             }
             else
             {
                 // Skill com alvo único
-                var target = FindTarget(battle, action.TargetId);
+                var target = FindTargetCharacter(battle, action.TargetId);
                 if (target == null)
                 {
                     return;
                 }
 
-                if (skill.Damage > 0)
-                {
-                    if (target is Player playerTarget)
-                    {
-                        int damage = CalculateSkillDamage(caster, skill, playerTarget);
-                        playerTarget.Health = Math.Max(0, playerTarget.Health - damage);
-
-                        var result = new ActionResult
-                        {
-                            TargetId = playerTarget.Id,
-                            DamageReceived = damage,
-                            HealingReceived = 0,
-                            IsDead = !playerTarget.IsAlive
-                        };
-
-                        results.Add(result);
-                    }
-                    else if (target is Enemy enemyTarget)
-                    {
-                        int damage = CalculateSkillDamage(caster, skill, enemyTarget);
-                        enemyTarget.Health = Math.Max(0, enemyTarget.Health - damage);
-
-                        var result = new ActionResult
-                        {
-                            TargetId = enemyTarget.Id,
-                            DamageReceived = damage,
-                            HealingReceived = 0,
-                            IsDead = !enemyTarget.IsAlive
-                        };
-
-                        results.Add(result);
-                    }
-                }
-
-                if (skill.Healing > 0)
-                {
-                    if (target is Player playerTarget && IsAlly(caster, playerTarget, battle))
-                    {
-                        int healing = skill.Healing;
-                        playerTarget.Health = Math.Min(playerTarget.MaxHealth, playerTarget.Health + healing);
-
-                        var result = new ActionResult
-                        {
-                            TargetId = playerTarget.Id,
-                            DamageReceived = 0,
-                            HealingReceived = healing,
-                            IsDead = false
-                        };
-
-                        results.Add(result);
-                    }
-                }
+                var targetResults = skill.ApplyEffects(caster, target, battle);
+                results.AddRange(targetResults);
             }
         }
 
@@ -1145,6 +1096,28 @@ namespace BattleSystem.Server
             // Procurar entre inimigos
             var enemy = battle.Enemies.FirstOrDefault(e => e.Id == targetId);
             return enemy;
+        }
+
+        private Character FindTargetCharacter(Battle battle, string targetId)
+        {
+            // Procurar entre jogadores
+            foreach (var team in battle.Teams)
+            {
+                var player = team.Players.FirstOrDefault(p => p.Id == targetId);
+                if (player != null)
+                {
+                    return player;
+                }
+            }
+
+            // Procurar entre inimigos
+            var enemy = battle.Enemies.FirstOrDefault(e => e.Id == targetId);
+            if (enemy != null)
+            {
+                return enemy;
+            }
+            
+            return null;
         }
 
         private bool IsAlly(Player caster, object target, Battle battle)

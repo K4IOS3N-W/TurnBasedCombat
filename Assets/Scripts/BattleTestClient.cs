@@ -9,6 +9,7 @@ using Newtonsoft.Json;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
+using BattleSystem.UI; // Adicionar para referenciar o BattleUIManager
 
 namespace BattleSystem
 {
@@ -53,6 +54,7 @@ namespace BattleSystem
         [SerializeField] private Button passButton;
         [SerializeField] private TMP_Dropdown targetSelectionDropdown;
         [SerializeField] private TMP_Dropdown skillSelectionDropdown;
+        [SerializeField] private TextMeshProUGUI skillDescriptionText;
 
         [Header("UI - Estado da Batalha")]
         [SerializeField] private Button refreshStateButton;
@@ -86,6 +88,9 @@ namespace BattleSystem
 
         [Header("UI - Resultado da Batalha")]
         [SerializeField] private TextMeshProUGUI battleResultText;
+
+        [Header("Arena")]
+        [SerializeField] private BattleArenaManager arenaManager;
 
         #endregion
 
@@ -166,9 +171,9 @@ namespace BattleSystem
             if (joinBattleButton != null) joinBattleButton.onClick.AddListener(JoinBattle);
             if (startBattleButton != null) startBattleButton.onClick.AddListener(StartBattle);
             if (addEnemyButton != null) addEnemyButton.onClick.AddListener(AddEnemyToList);
-            if (attackButton != null) attackButton.onClick.AddListener(ExecuteAttack);
-            if (skillButton != null) skillButton.onClick.AddListener(ExecuteSkill);
-            if (passButton != null) passButton.onClick.AddListener(ExecutePass);
+            if (attackButton != null) attackButton.onClick.AddListener(() => ExecuteAction(ActionType.Attack));
+            if (skillButton != null) skillButton.onClick.AddListener(() => ExecuteAction(ActionType.Skill));
+            if (passButton != null) passButton.onClick.AddListener(() => ExecuteAction(ActionType.Pass));
             if (refreshStateButton != null) refreshStateButton.onClick.AddListener(GetBattleState);
             if (createTeamButton != null) createTeamButton.onClick.AddListener(CreateTeam);
             if (refreshTeamsButton != null) refreshTeamsButton.onClick.AddListener(RefreshTeams);
@@ -613,15 +618,19 @@ namespace BattleSystem
         }
 
         #endregion
+
         #region Processamento de Mensagens
 
         private void ProcessMessage(string message)
         {
             try
             {
+                // Configurar conversor personalizado para ISkillEffect
+                var jsonSettings = GetJsonSettings();
+
                 LogMessage($"Recebido: {message}");
 
-                var baseResponse = JsonConvert.DeserializeObject<BaseResponse>(message);
+                var baseResponse = JsonConvert.DeserializeObject<BaseResponse>(message, jsonSettings);
 
                 if (!baseResponse.Success)
                 {
@@ -632,37 +641,37 @@ namespace BattleSystem
                 // Tratamento específico por tipo de mensagem
                 if (message.Contains("\"level\"") && message.Contains("\"experienceToNextLevel\""))
                 {
-                    var expResponse = JsonConvert.DeserializeObject<ExperienceUpdateResponse>(message);
+                    var expResponse = JsonConvert.DeserializeObject<ExperienceUpdateResponse>(message, jsonSettings);
                     HandleExperienceUpdate(expResponse);
                 }
                 else if (message.Contains("\"battleId\"") && !message.Contains("\"battle\""))
                 {
-                    var response = JsonConvert.DeserializeObject<CreateBattleResponse>(message);
+                    var response = JsonConvert.DeserializeObject<CreateBattleResponse>(message, jsonSettings);
                     HandleCreateBattleResponse(response);
                 }
                 else if (message.Contains("\"teamId\"") && message.Contains("\"teamName\"") && !message.Contains("\"playerId\""))
                 {
-                    var response = JsonConvert.DeserializeObject<CreateTeamResponse>(message);
+                    var response = JsonConvert.DeserializeObject<CreateTeamResponse>(message, jsonSettings);
                     HandleCreateTeamResponse(response);
                 }
                 else if (message.Contains("\"playerId\""))
                 {
-                    var response = JsonConvert.DeserializeObject<JoinBattleResponse>(message);
+                    var response = JsonConvert.DeserializeObject<JoinBattleResponse>(message, jsonSettings);
                     HandleJoinBattleResponse(response);
                 }
                 else if (message.Contains("\"turnOrder\""))
                 {
-                    var response = JsonConvert.DeserializeObject<StartBattleResponse>(message);
+                    var response = JsonConvert.DeserializeObject<StartBattleResponse>(message, jsonSettings);
                     HandleStartBattleResponse(response);
                 }
                 else if (message.Contains("\"results\""))
                 {
-                    var response = JsonConvert.DeserializeObject<ExecuteActionResponse>(message);
+                    var response = JsonConvert.DeserializeObject<ExecuteActionResponse>(message, jsonSettings);
                     HandleExecuteActionResponse(response);
                 }
                 else if (message.Contains("\"battle\""))
                 {
-                    var response = JsonConvert.DeserializeObject<GetBattleStateResponse>(message);
+                    var response = JsonConvert.DeserializeObject<GetBattleStateResponse>(message, jsonSettings);
                     HandleBattleStateResponse(response);
                 }
                 else
@@ -819,6 +828,18 @@ namespace BattleSystem
 
             // Atualizar estado da batalha após a ação para ver as mudanças
             GetBattleState();
+
+            // Atualizar arena se o gerenciador estiver disponível
+            if (arenaManager != null && currentState == ClientState.InBattle)
+            {
+                arenaManager.UpdateCharactersState(currentBattle);
+
+                // Highlight no personagem do turno atual
+                if (!string.IsNullOrEmpty(currentBattle.CurrentParticipant))
+                {
+                    arenaManager.HighlightCurrentTurn(currentBattle.CurrentParticipant);
+                }
+            }
         }
 
         private void HandleBattleStateResponse(GetBattleStateResponse response)
@@ -1193,22 +1214,7 @@ namespace BattleSystem
             await SendMessage(request);
         }
 
-        public void ExecuteAttack()
-        {
-            ExecuteAction(ActionType.Attack).ConfigureAwait(false);
-        }
-
-        public void ExecuteSkill()
-        {
-            ExecuteAction(ActionType.Skill).ConfigureAwait(false);
-        }
-
-        public void ExecutePass()
-        {
-            ExecuteAction(ActionType.Pass).ConfigureAwait(false);
-        }
-
-        private async Task ExecuteAction(ActionType actionType)
+        public async Task ExecuteAction(ActionType actionType)
         {
             if (string.IsNullOrEmpty(battleId) || string.IsNullOrEmpty(playerId) || currentBattle == null)
             {
@@ -1246,7 +1252,15 @@ namespace BattleSystem
                 Action = action
             };
 
-            await SendMessage(request);
+            try
+            {
+                await SendMessage(request);
+                LogMessage($"Ação enviada com sucesso: {actionType}");
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"Erro ao executar ação: {ex.Message}");
+            }
         }
 
         private string GetSelectedTargetId(ActionType actionType)
@@ -1334,6 +1348,19 @@ namespace BattleSystem
                 string teamsText = FormatTeamsText(playerTeam);
                 string enemiesText = FormatEnemiesText();
                 battleStateText.text = $"{battleStateText.text}\n\n{teamsText}{enemiesText}";
+            }
+
+            // Atualizar arena se o gerenciador estiver disponível
+            if (arenaManager != null && currentState == ClientState.InBattle)
+            {
+                arenaManager.SetupArena(currentBattle);
+                arenaManager.UpdateCharactersState(currentBattle);
+
+                // Highlight no personagem do turno atual
+                if (!string.IsNullOrEmpty(currentBattle.CurrentParticipant))
+                {
+                    arenaManager.HighlightCurrentTurn(currentBattle.CurrentParticipant);
+                }
             }
         }
 
@@ -1518,32 +1545,88 @@ namespace BattleSystem
             }
         }
 
-        private void UpdateSkillsDropdown()
+        public void UpdateSkillsDropdown()
         {
-            if (currentBattle == null || skillSelectionDropdown == null)
-                return;
-
             skillSelectionDropdown.ClearOptions();
             skillIdMap.Clear();
-            List<string> skillDisplayNames = new List<string>();
 
+            // Encontrar o jogador
             Player currentPlayer = GetCurrentPlayer();
-            if (currentPlayer != null && currentPlayer.Skills != null)
-            {
-                foreach (var skill in currentPlayer.Skills)
-                {
-                    string cooldownInfo = skill.CurrentCooldown > 0 ? $" (CD: {skill.CurrentCooldown})" : "";
-                    string manaInfo = skill.ManaCost > 0 ? $" - {skill.ManaCost} MP" : "";
-                    bool canUse = skill.CurrentCooldown == 0 && currentPlayer.Mana >= skill.ManaCost;
-                    string usabilityInfo = canUse ? "" : " [Indisponível]";
+            if (currentPlayer == null || currentPlayer.Skills == null) return;
 
-                    string displayName = $"{skill.Name}{manaInfo}{cooldownInfo}{usabilityInfo}";
-                    skillDisplayNames.Add(displayName);
-                    skillIdMap[displayName] = skill.Id;
+            // Adicionar habilidades disponíveis
+            List<string> skillNames = new List<string>();
+
+            foreach (var skill in currentPlayer.Skills)
+            {
+                // Verificar se a habilidade pode ser usada
+                bool canUse = skill.CurrentCooldown == 0 && currentPlayer.Mana >= skill.ManaCost;
+
+                string skillDisplay = $"{skill.Name} ({skill.ManaCost} MP)";
+                if (skill.CurrentCooldown > 0)
+                {
+                    skillDisplay += $" [CD: {skill.CurrentCooldown}]";
                 }
+
+                skillIdMap[skill.Id] = skillDisplay;
+                skillNames.Add(skillDisplay);
             }
 
-            skillSelectionDropdown.AddOptions(skillDisplayNames);
+            skillSelectionDropdown.AddOptions(skillNames);
+
+            // Atualizar detalhes da habilidade selecionada
+            UpdateSelectedSkillDetails();
+        }
+
+        private void UpdateSelectedSkillDetails()
+        {
+            if (skillSelectionDropdown.options.Count == 0) return;
+
+            int selectedIndex = skillSelectionDropdown.value;
+            string skillDisplay = skillSelectionDropdown.options[selectedIndex].text;
+            string skillId = skillIdMap.FirstOrDefault(x => x.Value == skillDisplay).Key;
+
+            if (string.IsNullOrEmpty(skillId)) return;
+
+            // Encontrar a habilidade no jogador atual
+            Player currentPlayer = GetCurrentPlayer();
+            if (currentPlayer == null) return;
+
+            Skill selectedSkill = currentPlayer.Skills.FirstOrDefault(s => s.Id == skillId);
+            if (selectedSkill == null) return;
+
+            // Atualizar UI com detalhes da habilidade
+            if (skillDescriptionText != null)
+            {
+                string description = selectedSkill.Description;
+
+                // Adicionar detalhes extras
+                if (selectedSkill.Damage > 0)
+                {
+                    description += $"\nDano: {selectedSkill.Damage}";
+                }
+
+                if (selectedSkill.Healing > 0)
+                {
+                    description += $"\nCura: {selectedSkill.Healing}";
+                }
+
+                if (selectedSkill.StatusEffects.Count > 0)
+                {
+                    description += "\nEfeitos:";
+                    foreach (var effect in selectedSkill.StatusEffects)
+                    {
+                        description += $"\n- {effect.Name} ({effect.Duration} turnos)";
+                    }
+                }
+
+                if (selectedSkill.Element != SkillElement.None)
+                {
+                    description += $"\nElemento: {selectedSkill.Element}";
+                }
+
+                skillDescriptionText.text = description;
+            }
         }
 
         private void UpdatePlayerProgressUI()
@@ -1605,21 +1688,6 @@ namespace BattleSystem
             return null;
         }
 
-        private Player GetCurrentPlayer()
-        {
-            if (string.IsNullOrEmpty(playerId) || currentBattle == null)
-                return null;
-
-            foreach (var team in currentBattle.Teams)
-            {
-                var player = team.Players.FirstOrDefault(p => p.Id == playerId);
-                if (player != null)
-                    return player;
-            }
-
-            return null;
-        }
-
         private bool IsAlly(string characterId)
         {
             if (currentBattle == null || string.IsNullOrEmpty(playerId) || string.IsNullOrEmpty(characterId))
@@ -1654,6 +1722,23 @@ namespace BattleSystem
             }
         }
 
+        private Player GetCurrentPlayer()
+        {
+            if (currentBattle == null || string.IsNullOrEmpty(playerId))
+                return null;
+
+            foreach (var team in currentBattle.Teams)
+            {
+                foreach (var player in team.Players)
+                {
+                    if (player.Id == playerId)
+                        return player;
+                }
+            }
+
+            return null;
+        }
+
         private void LogMessage(string message)
         {
             Debug.Log($"[BattleTestClient] {message}");
@@ -1672,6 +1757,15 @@ namespace BattleSystem
             }
         }
 
+        private JsonSerializerSettings GetJsonSettings()
+        {
+            return new JsonSerializerSettings
+            {
+                Converters = new List<JsonConverter> { new Serialization.SkillEffectConverter() },
+                TypeNameHandling = TypeNameHandling.Auto
+            };
+        }
+
         #endregion
 
         #region Métodos Públicos
@@ -1682,6 +1776,42 @@ namespace BattleSystem
         {
             serverIp = ip;
             serverPort = port;
+        }
+
+        #endregion
+
+        #region Navegação de Painéis
+
+        private void ChangePanel(string panelName)
+        {
+            var uiManager = BattleUIManager.Instance;
+            if (uiManager == null) return;
+
+            GameObject targetPanel = null;
+
+            switch (panelName)
+            {
+                case "Lobby":
+                    targetPanel = uiManager.lobbyPanel;
+                    break;
+                case "Battle":
+                    targetPanel = uiManager.battlePanel;
+                    break;
+                case "TeamSelection":
+                    targetPanel = uiManager.teamSelectionPanel;
+                    break;
+                case "BattleResult":
+                    targetPanel = uiManager.battleResultPanel;
+                    break;
+                case "SkillSelection":
+                    targetPanel = uiManager.skillSelectionPanel;
+                    break;
+            }
+
+            if (targetPanel != null)
+            {
+                uiManager.NavigateTo(targetPanel);
+            }
         }
 
         #endregion

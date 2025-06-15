@@ -4,6 +4,16 @@ using System.Linq;
 
 namespace BattleSystem
 {
+    /// <summary>
+    /// Interface para implementar efeitos de habilidades de forma modular
+    /// </summary>
+    public interface ISkillEffect
+    {
+        string EffectId { get; }
+        string Name { get; }
+        void Apply(Character caster, Character target, Skill skill, Battle battle, List<ActionResult> results);
+    }
+
     [Serializable]
     public class Skill
     {
@@ -50,6 +60,48 @@ namespace BattleSystem
         // Propriedades adicionais genéricas
         public Dictionary<string, object> Properties { get; set; } = new Dictionary<string, object>();
 
+        // Lista de efeitos de habilidade modulares
+        [NonSerialized]
+        private List<ISkillEffect> _effects;
+
+        public List<ISkillEffect> Effects
+        {
+            get
+            {
+                if (_effects == null)
+                {
+                    _effects = new List<ISkillEffect>();
+                    // Aqui podemos adicionar efeitos padrão baseados no tipo da habilidade
+                    if (Damage > 0)
+                    {
+                        _effects.Add(new DamageSkillEffect());
+                    }
+                    if (Healing > 0)
+                    {
+                        _effects.Add(new HealingSkillEffect());
+                    }
+                    if (StatusEffects.Count > 0)
+                    {
+                        _effects.Add(new StatusEffectSkillEffect());
+                    }
+                    if (Type == SkillType.Execute)
+                    {
+                        _effects.Add(new ExecuteSkillEffect());
+                    }
+                    if (Type == SkillType.Taunt)
+                    {
+                        _effects.Add(new TauntSkillEffect());
+                    }
+                    if (Type == SkillType.Drain)
+                    {
+                        _effects.Add(new DrainSkillEffect());
+                    }
+                }
+                return _effects;
+            }
+            set { _effects = value; }
+        }
+
         // Construtor
         public Skill()
         {
@@ -61,6 +113,34 @@ namespace BattleSystem
             Id = id;
             Name = name;
             Description = description;
+        }
+
+        // Adiciona um efeito à habilidade
+        public void AddEffect(ISkillEffect effect)
+        {
+            if (!Effects.Any(e => e.EffectId == effect.EffectId))
+            {
+                Effects.Add(effect);
+            }
+        }
+
+        // Remove um efeito da habilidade
+        public void RemoveEffect(string effectId)
+        {
+            Effects.RemoveAll(e => e.EffectId == effectId);
+        }
+
+        // Aplica todos os efeitos da habilidade
+        public List<ActionResult> ApplyEffects(Character caster, Character target, Battle battle)
+        {
+            var results = new List<ActionResult>();
+
+            foreach (var effect in Effects)
+            {
+                effect.Apply(caster, target, this, battle, results);
+            }
+
+            return results;
         }
 
         public bool CanUse(Character caster, Battle battle = null)
@@ -85,6 +165,46 @@ namespace BattleSystem
         {
             if (CurrentCooldown > 0)
                 CurrentCooldown--;
+        }
+
+        // Calcula dano considerando crítico e resistências elementais
+        public int CalculateDamage(Character caster, Character target)
+        {
+            int baseDamage = Damage;
+
+            // Aplicar bônus de execução se aplicável
+            if (Type == SkillType.Execute && target.Health <= target.MaxHealth * ExecuteThreshold)
+            {
+                baseDamage += ExecuteDamageBonus;
+            }
+
+            // Verificar crítico
+            bool isCritical = new Random().NextDouble() < CriticalChance;
+            if (isCritical)
+            {
+                baseDamage = (int)(baseDamage * CriticalMultiplier);
+            }
+
+            // Aplicar resistências elementais
+            float elementModifier = 1.0f;
+            if (target is Enemy enemy && Element != SkillElement.None)
+            {
+                elementModifier = enemy.CalculateElementalModifier(Element);
+            }
+
+            // Calcular dano final
+            int attackPower = caster.GetModifiedAttack();
+            int defense = target.GetModifiedDefense();
+            float damageReduction = defense / 100f;
+
+            int finalDamage = (int)(baseDamage * (1 - Math.Min(0.75f, damageReduction)) * elementModifier);
+
+            // Adicionar aleatoriedade (+-10%)
+            Random random = new Random();
+            float variation = random.Next(-10, 11) / 100f;
+            finalDamage = (int)(finalDamage * (1 + variation));
+
+            return Math.Max(1, finalDamage);
         }
 
         public List<string> GetValidTargets(Character caster, Battle battle)
@@ -266,6 +386,206 @@ namespace BattleSystem
                 Element = Element,
                 IsUsable = CurrentCooldown == 0
             };
+        }
+    }
+
+    // Classes de efeitos de habilidades
+    public class DamageSkillEffect : ISkillEffect
+    {
+        public string EffectId => "damage";
+        public string Name => "Dano";
+
+        public void Apply(Character caster, Character target, Skill skill, Battle battle, List<ActionResult> results)
+        {
+            if (skill.Damage <= 0) return;
+
+            int damage = skill.CalculateDamage(caster, target);
+            target.Health = Math.Max(0, target.Health - damage);
+
+            var result = new ActionResult
+            {
+                TargetId = target.Id,
+                AttackerId = caster.Id,
+                DamageReceived = damage,
+                IsDead = !target.IsAlive,
+                IsCritical = damage > skill.Damage * 1.2f, // Aproximação para detectar crítico
+                Message = $"{target.Name} recebeu {damage} de dano"
+            };
+
+            results.Add(result);
+        }
+    }
+
+    public class HealingSkillEffect : ISkillEffect
+    {
+        public string EffectId => "healing";
+        public string Name => "Cura";
+
+        public void Apply(Character caster, Character target, Skill skill, Battle battle, List<ActionResult> results)
+        {
+            if (skill.Healing <= 0) return;
+
+            int healing = skill.Healing;
+
+            // Bônus baseado em atributos
+            if (caster is Player player)
+            {
+                // Curandeiros curam mais
+                if (player.Class.ToLower() == "healer")
+                {
+                    healing = (int)(healing * 1.2f);
+                }
+            }
+
+            int healingDone = Math.Min(target.MaxHealth - target.Health, healing);
+            target.Health += healingDone;
+
+            var result = new ActionResult
+            {
+                TargetId = target.Id,
+                AttackerId = caster.Id,
+                HealingReceived = healingDone,
+                Message = $"{target.Name} recuperou {healingDone} de vida"
+            };
+
+            results.Add(result);
+        }
+    }
+
+    public class StatusEffectSkillEffect : ISkillEffect
+    {
+        public string EffectId => "status_effect";
+        public string Name => "Efeito de Status";
+
+        public void Apply(Character caster, Character target, Skill skill, Battle battle, List<ActionResult> results)
+        {
+            if (skill.StatusEffects.Count == 0) return;
+
+            foreach (var effect in skill.StatusEffects)
+            {
+                target.AddStatusEffect(effect, caster.Id, skill.EffectDuration > 0 ? skill.EffectDuration : effect.Duration);
+
+                var result = new ActionResult
+                {
+                    TargetId = target.Id,
+                    AttackerId = caster.Id,
+                    EffectApplied = effect.Name,
+                    Message = $"{target.Name} afetado por {effect.Name}"
+                };
+
+                results.Add(result);
+            }
+        }
+    }
+
+    public class ExecuteSkillEffect : ISkillEffect
+    {
+        public string EffectId => "execute";
+        public string Name => "Execução";
+
+        public void Apply(Character caster, Character target, Skill skill, Battle battle, List<ActionResult> results)
+        {
+            if (skill.Type != SkillType.Execute) return;
+
+            bool isExecutable = target.Health <= target.MaxHealth * skill.ExecuteThreshold;
+            int damage = skill.CalculateDamage(caster, target);
+
+            if (isExecutable)
+            {
+                damage += skill.ExecuteDamageBonus;
+            }
+
+            target.Health = Math.Max(0, target.Health - damage);
+
+            var result = new ActionResult
+            {
+                TargetId = target.Id,
+                AttackerId = caster.Id,
+                DamageReceived = damage,
+                IsDead = !target.IsAlive,
+                Message = isExecutable
+                    ? $"Execução! {target.Name} recebeu {damage} de dano"
+                    : $"{target.Name} recebeu {damage} de dano"
+            };
+
+            results.Add(result);
+        }
+    }
+
+    public class TauntSkillEffect : ISkillEffect
+    {
+        public string EffectId => "taunt";
+        public string Name => "Provocação";
+
+        public void Apply(Character caster, Character target, Skill skill, Battle battle, List<ActionResult> results)
+        {
+            if (skill.Type != SkillType.Taunt) return;
+
+            // Criar efeito de provocação
+            var tauntEffect = new StatusEffect(
+                "effect_taunt_" + caster.Id,
+                "Provocado",
+                StatusEffectType.Taunt,
+                0, // Valor não importa para Taunt
+                skill.TauntDuration > 0 ? skill.TauntDuration : 2 // Duração padrão: 2 turnos
+            );
+
+            target.AddStatusEffect(tauntEffect, caster.Id);
+            target.TauntedBy = caster.Id;
+
+            var result = new ActionResult
+            {
+                TargetId = target.Id,
+                AttackerId = caster.Id,
+                EffectApplied = "Provocação",
+                Message = $"{target.Name} foi provocado por {caster.Name}"
+            };
+
+            results.Add(result);
+        }
+    }
+
+    public class DrainSkillEffect : ISkillEffect
+    {
+        public string EffectId => "drain";
+        public string Name => "Drenagem";
+
+        public void Apply(Character caster, Character target, Skill skill, Battle battle, List<ActionResult> results)
+        {
+            if (skill.Type != SkillType.Drain) return;
+
+            int damage = skill.CalculateDamage(caster, target);
+            target.Health = Math.Max(0, target.Health - damage);
+
+            // Drenar como cura (geralmente 30-50% do dano)
+            int drainPercent = skill.Properties.TryGetValue("DrainPercent", out object drainObj)
+                ? Convert.ToInt32(drainObj)
+                : 30;
+
+            int healing = (int)(damage * drainPercent / 100f);
+            caster.Health = Math.Min(caster.MaxHealth, caster.Health + healing);
+
+            // Resultado do dano
+            var damageResult = new ActionResult
+            {
+                TargetId = target.Id,
+                AttackerId = caster.Id,
+                DamageReceived = damage,
+                IsDead = !target.IsAlive,
+                Message = $"{target.Name} perdeu {damage} de vida"
+            };
+
+            // Resultado da cura
+            var healResult = new ActionResult
+            {
+                TargetId = caster.Id,
+                AttackerId = caster.Id,
+                HealingReceived = healing,
+                Message = $"{caster.Name} drenou {healing} de vida"
+            };
+
+            results.Add(damageResult);
+            results.Add(healResult);
         }
     }
 
