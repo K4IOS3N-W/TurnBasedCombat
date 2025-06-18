@@ -1517,6 +1517,19 @@ namespace BattleSystem.Server
                         MaxCooldown = 2
                     });
 
+                    skills.Add(new Skill
+                    {
+                        Id = "skill_warrior_divinesmite",
+                        Name = "Divine Smite",
+                        Description = "Um ataque físico poderoso",
+                        Damage = 200 + (level * 5),
+                        ManaCost = 20,
+                        Range = 1,
+                        CurrentCooldown = 0,
+                        MaxCooldown = 2,
+                        Type = SkillType.Active
+                    });
+
                     if (level >= 3)
                     {
                         skills.Add(new Skill
@@ -1541,6 +1554,20 @@ namespace BattleSystem.Server
                         Damage = 90 + (level * 6),
                         ManaCost = 30,
                         Range = 3,
+                        CurrentCooldown = 0,
+                        MaxCooldown = 1
+                    });
+
+                    skills.Add(new Skill
+                    {
+                        Id = "skill_mage_buff",
+                        Name = "Empower",
+                        Description = "Fortalece aliados",
+                        EffectDuration = 3,
+                        ManaCost = 30,
+                        Range = 3,
+                        TargetType = TargetType.AllAllies,
+                        Type = SkillType.Buff,
                         CurrentCooldown = 0,
                         MaxCooldown = 1
                     });
